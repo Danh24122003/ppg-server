@@ -502,6 +502,40 @@ def clear_history(device_id: str):
     return {"device_id": device_id, "deleted": len(keys)}
 
 
+@app.get("/api/ppg/stats/{device_id}")
+def device_stats(device_id: str):
+    """HR/SpO2 mean/min/max trong 24h của device"""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    readings = [
+        v for v in readings_db.values()
+        if v["device_id"] == device_id and v["timestamp"] >= cutoff
+    ]
+    if not readings:
+        raise HTTPException(404, "Không có dữ liệu trong 24h qua cho thiết bị này")
+
+    hr_values  = [r["heart_rate"] for r in readings if r["heart_rate"] > 0]
+    spo2_values = [r["spo2"] for r in readings if r["spo2"] > 0]
+
+    def _stats(vals):
+        if not vals:
+            return {"mean": None, "min": None, "max": None}
+        arr = np.array(vals)
+        return {
+            "mean": round(float(np.mean(arr)), 1),
+            "min":  round(float(np.min(arr)),  1),
+            "max":  round(float(np.max(arr)),  1),
+        }
+
+    return {
+        "device_id":      device_id,
+        "period_hours":   24,
+        "total_readings": len(readings),
+        "heart_rate":     _stats(hr_values),
+        "spo2":           _stats(spo2_values),
+    }
+
+
 @app.get("/api/stats")
 def global_stats():
     """Thống kê toàn hệ thống"""

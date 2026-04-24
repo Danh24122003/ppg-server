@@ -218,8 +218,13 @@ def calculate_spo2(ir_values: np.ndarray, red_values: np.ndarray,
         return 0.0
 
     R = (ac_red / dc_red) / (ac_ir / dc_ir)
-    spo2 = 110.0 - 25.0 * R
-    return round(max(0.0, min(100.0, spo2)), 1)
+    if R < 0.7:
+        spo2 = 105.5 - 17.0 * R
+    elif R < 1.1:
+        spo2 = 102.0 - 19.5 * R
+    else:
+        spo2 = 108.0 - 23.0 * R
+    return round(float(np.clip(spo2, 85.0, 100.0)), 1)
 
 
 def assess_signal_quality(raw_signal: np.ndarray,
