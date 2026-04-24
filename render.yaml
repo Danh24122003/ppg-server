@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ppg-server
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PPG_STRICT_PKL_VERIFY
+        value: "1"
