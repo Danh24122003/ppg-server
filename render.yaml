@@ -1,9 +1,20 @@
 services:
   - type: web
-    name: ppg-server
+    name: ppg-backend
     runtime: docker
     plan: free
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    envVars:
+      - key: PORT
+        value: 8000
+
+  - type: web
+    name: ppg-ml
+    runtime: docker
+    plan: free
+    dockerfilePath: ./ml/Dockerfile
+    dockerContext: ./ml
     envVars:
       - key: PORT
         value: 8000
