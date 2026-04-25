@@ -104,8 +104,13 @@ HR_MAX_BPM = 200
 
 SPO2_MIN_VALID = 85.0
 SPO2_MAX_VALID = 100.0
-SPO2_RATIO_MIN = 0.4
+# Researcher-backed (Bent 2021 PMC8699050, Lim 2023 PMC10377640):
+# Reflectance MAX30102 mode có optical path ngắn hơn transmission → R thấp hơn.
+# R=0.3-0.4 ánh xạ SpO2=98-100% (sinh lý bình thường), không có rủi ro missed hypoxia.
+SPO2_RATIO_MIN = 0.3
 SPO2_RATIO_MAX = 2.0
+# Perfusion index guard: tránh false positive khi R "ngon" do noise (PI < 0.3%)
+SPO2_PI_MIN = 0.003  # tương đương PI = 0.3%
 SPO2_SMOOTH_WINDOW = 5
 
 AC_DC_MIN_IR = 0.001
@@ -528,6 +533,11 @@ def calculate_spo2_v23(ir: np.ndarray, red: np.ndarray,
     R = acdc_red / acdc_ir
     if not (SPO2_RATIO_MIN <= R <= SPO2_RATIO_MAX):
         return None, R, acdc_ir, acdc_red, "ratio_r_out_of_range"
+
+    # Perfusion guard: ngay cả khi R trong range, nếu PI quá thấp →
+    # tín hiệu noise quá lớn so với pulsation → reject để tránh false positive
+    if acdc_ir < SPO2_PI_MIN:
+        return None, R, acdc_ir, acdc_red, "low_perfusion_index"
 
     if R < 0.7:
         spo2 = 105.5 - 17.0 * R
