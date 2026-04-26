@@ -104,13 +104,15 @@ HR_MAX_BPM = 200
 
 SPO2_MIN_VALID = 85.0
 SPO2_MAX_VALID = 100.0
-# Researcher-backed (Bent 2021 PMC8699050, Lim 2023 PMC10377640):
-# Reflectance MAX30102 mode có optical path ngắn hơn transmission → R thấp hơn.
-# R=0.3-0.4 ánh xạ SpO2=98-100% (sinh lý bình thường), không có rủi ro missed hypoxia.
-SPO2_RATIO_MIN = 0.3
-SPO2_RATIO_MAX = 2.0
-# Perfusion index guard: tránh false positive khi R "ngon" do noise (PI < 0.3%)
-SPO2_PI_MIN = 0.003  # tương đương PI = 0.3%
+# Evidence-backed thresholds:
+# - R range [0.4, 1.4] cover SpO2 70-100% theo Blaney et al. 2024
+#   (J Biomed Opt 29(S3):S33313, PMC12238718) — peer-reviewed measurement
+# - R > 1.4 = SpO2 < 70%, hầu như không sinh lý → reject là artifact
+# - PI > 0.2% an toàn vs clinical concern 0.5% (Schneider 2024 JECCM,
+#   JAMA 2024 PubMed 38109495)
+SPO2_RATIO_MIN = 0.4   # Blaney 2024 — physical lower bound cho SpO2 ≤ 100%
+SPO2_RATIO_MAX = 1.4   # Blaney 2024 — physical upper bound cho SpO2 ≥ 70%
+SPO2_PI_MIN = 0.002    # 0.2% — conservative vs Schneider/JAMA clinical concern 0.5%
 SPO2_SMOOTH_WINDOW = 5
 
 AC_DC_MIN_IR = 0.001
