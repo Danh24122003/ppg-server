@@ -1,226 +1,248 @@
-# PPG Monitor — ML Code: Bao Cao Tien Trinh
+# PPG Monitor — Báo Cáo Tiến Trình Tổng Thể
 
-> Cap nhat lan cuoi: 2026-04-22  
-> Trang thai: IDLE (file cuoi sua doi cach day 53.1 gio)
+> Cập nhật lần cuối: **2026-04-26 (evening)**  
+> Trạng thái: **ACTIVE** — Backend v4.3 LIVE, ML server v4.3 vừa merge HRV logic, firmware v4.0.9 thesis-ready
 
 ---
 
-## Tong quan nhanh
+## Tổng quan nhanh
 
-| Hang muc | Trang thai | Chi tiet |
+| Hạng mục | Trạng thái | Chi tiết |
 |----------|-----------|---------|
-| Feature Extraction (38 features) | OK | Day du 18 time + 8 freq + 12 morph |
-| Classical ML (RF/GB/SVR) | PHAN | Code co, model chua train voi data thuc |
-| Deep Learning (CNN-LSTM) | PHAN | NumPy simulation co, weights chua train |
-| Transformer (Self-Attention) | PHAN | NumPy simulation co, weights chua train |
-| Ensemble Predictor | OK | Co logic weighted average, fallback rule-based |
-| Train script (PPG-BP dataset) | THIEU | `train_ppg_bp.py` khong ton tai |
-| Model files (.pkl / .npz) | THIEU | Thu muc `models/` khong ton tai |
-| Tests (pytest) | THIEU | Khong co file test nao |
-| Deploy config | OK | Dockerfile + render.yaml co san |
+| Backend Core (FastAPI) | **✅ DONE v4.3** | `main.py` 900 dòng, 181/181 tests pass, Blaney 2024 thresholds |
+| ML Pipeline | ✅ DONE + enhanced | RF + SVR train PPG-BP dataset, **vừa merge backend v4.3 HRV logic vào ml/main.py** |
+| GitHub Repo | ✅ DONE | Monorepo `backend/` + `ml/` tại `Danh24122003/ppg-server` |
+| Render Deploy (ML) | ⏳ Transition v3.0 → v4.3 | `ppg-ml.onrender.com` — code v4.3 ready, chờ push deploy |
+| Render Deploy (Backend) | ✅ **LIVE v4.3** | `ppg-backend-udze.onrender.com` |
+| ESP32 Firmware (testing) | ✅ **v4.0.9** | NodeMCU-32S Ai-Thinker — fs=50Hz stable, calibration robust. Dùng tạm để test pipeline. |
+| **ESP32 Firmware (final)** | ⏳ **CHƯA migrate** | **XIAO ESP32-S3 (Seeed) là hardware cuối cùng cho thesis demo** — cần port v4.0.9 (đổi pin SDA=5, SCL=6, LED=21) |
+| Android App | ❓ UNKNOWN | Chưa kiểm tra trong scope này |
 
-**Tong tien do: ~55% (6/11 hang muc)**
+**Hardware target (final cho thesis):** **Seeed Studio XIAO ESP32-S3** (LX7 dual-core, 8MB PSRAM, native USB CDC, form factor mini 2×2cm). NodeMCU-32S hiện tại chỉ là module test pipeline — sẽ migrate sang XIAO trước demo cuối.
+
+**Tổng tiến độ: ~93%** (chỉ còn deploy ML v4.3 + **migrate firmware sang XIAO ESP32-S3** + final thesis demo)
 
 ---
 
-## Cau truc thu muc hien tai
+## Giai đoạn 1 — Core (BACKEND GẦN HOÀN THIỆN)
+
+| Task | Trạng thái | Ghi chú |
+|------|-----------|---------|
+| HRV time-domain: SDNN + RMSSD + pNN50 + MeanNN | ✅ DONE | pNN50 theo chuẩn Task Force 1996 (chia `len(diff_nn)`) |
+| SpO2 piecewise calibration | ✅ DONE | 3 đoạn theo R — tốt hơn đơn tuyến |
+| Signal Quality Assessment | ✅ DONE | Welch PSD spectral purity + peak density + amplitude |
+| HeartPy adaptive threshold peak detection | ✅ DONE | Overlap buffer 1.5s + RR accumulator + deduplication |
+| **LF/HF ratio (frequency-domain HRV)** | ✅ **DONE v4.1** | Cubic spline + Welch PSD, guard ≥60 RR intervals |
+| **Endpoint `/api/ppg/stats/{device_id}`** | ✅ **DONE** | HR/SpO2/HRV mean/min/max 24h |
+| **pNN20 (threshold 20ms)** | ✅ **DONE v4.3** | Research-backed: phân tách nhóm bệnh tốt hơn pNN50 [Mietus 2002] |
+| **Reliability indicator** | ✅ **DONE v4.3** | "low/medium/high" theo rr_count để client biết mức tin cậy |
+
+**Hoàn thành Giai đoạn 1: 8/8** ✅
+
+---
+
+## Giai đoạn 2 — Chất lượng (HOÀN THÀNH)
+
+| Task | Trạng thái | Ghi chú |
+|------|-----------|---------|
+| **Pytest coverage backend** | ✅ **DONE** | 182 tests (unit + integration + security + concurrent) |
+| **Logging (loguru)** | ✅ **DONE v4.1** | 5 log points có cấu trúc |
+| **CORS env-based** | ✅ **DONE v4.1** | `ALLOWED_ORIGINS` env var, default `*` cho dev |
+| **Authentication (X-Device-Token)** | ✅ **DONE v4.1+v4.2** | Header auth + `hmac.compare_digest` constant-time |
+| **Rate limiting (slowapi)** | ✅ **DONE v4.1** | 20/min upload, 60/min GET, 10/min DELETE |
+| **Thread safety (3-phase lock + per-device lock)** | ✅ **DONE v4.1+v4.2** | Signal processing ngoài lock, per-device serialization |
+| Module tách biệt (models/signal/storage) | ⏳ DEFER | Chưa cần — 900 dòng vẫn dễ đọc |
+
+**Hoàn thành Giai đoạn 2: 6/7** ✅ (1 defer)
+
+---
+
+## Giai đoạn 3 — Nâng cao
+
+| Task | Trạng thái | Ghi chú |
+|------|-----------|---------|
+| BP model training + deploy ML server | ✅ DONE | RF + SVR train PPG-BP dataset, LIVE tại `ppg-ml.onrender.com` |
+| Firebase Firestore thay in-memory | ⏳ CHƯA | Vẫn dùng Python dict (production cần migrate) |
+| WebSocket streaming | ⏳ CHƯA | Batch POST 5s vẫn OK cho MVP |
+| Dashboard web | ⏳ CHƯA | Android app làm UI chính |
+| Deep Learning BP (CNN-LSTM) | ⏳ CHƯA | Cần GPU + PulseDB dataset |
+| **Real data validation (Firebase replay)** | ✅ **DONE 2026-04-25** | Backend validate end-to-end với 86s data thật |
+
+**Hoàn thành Giai đoạn 3: 2/6**
+
+---
+
+## Timeline sự kiện quan trọng
+
+### 2026-04-24 (thứ 4)
+| Thời gian | Sự kiện |
+|-----------|---------|
+| 06:47 | Train thành công RF + SVR trên PPG-BP dataset thực (657 files, 219 subjects) |
+| 07:00 | Restructure repo → monorepo `backend/` + `ml/` |
+| 07:10 | Push GitHub `Danh24122003/ppg-server` |
+| 07:20 | Deploy ML server lên Render → `ppg-ml.onrender.com` |
+| 07:30 | Test end-to-end ML: HR=71.6 BPM, `classical_ml is_trained=true` |
+| Morning | **Backend v4.0** — Review round 1, fix 16 issues (142 tests) |
+| Afternoon | **Backend v4.1** — Review round 2, refactor 3-phase lock + 5 features (LF/HF, auth, rate limit, loguru, CORS). 159 tests |
+| Evening | **Backend v4.2** — Review round 3, security hardening (hmac.compare_digest, per-device lock, auth-before-ratelimit). 176 tests |
+
+### 2026-04-25 (thứ 5)
+| Thời gian | Sự kiện |
+|-----------|---------|
+| Morning | Research report về pNN50 formula (`docs/pNN50_research_report.md`) |
+| Mid-day | **Backend v4.3** — Apply Task Force 1996 formula + pNN20 + reliability indicator. 182 tests |
+| Afternoon | **Firebase Replay Validation** — Script `replay_firebase_data.py` chạy real data → 16/16 chunks OK, HR error 0.3 BPM vs FFT |
+
+### 2026-04-26 (thứ 6 — hôm nay)
+| Thời gian | Sự kiện |
+|-----------|---------|
+| Morning (~7am) | **Test 1:** Switch firmware URL → backend v4.3, threshold loosen v1 (R 0.3-2.0, PI 0.003). NodeMCU-32S v4.0.9 + Backend v4.3 → fs=50Hz, AC% 0.06-18.94% varied, HR conf 0.55-1.0, HRV rr_count 194-210 reliability=high, SpO2 đôi lúc valid (R 0.4-1.5) |
+| Evening (~8:28pm) | **Test 2 (sau threshold tighten Blaney 2024):** SpO2 valid 13/19 batches (68%), median 97.5%, HR conf 0.40-1.0, HRV rr_count progression 32→89 medium→high → **THESIS-READY** |
+| Evening | **Threshold tighten evidence-backed:** SPO2_RATIO_MAX 2.0→1.4 (Blaney 2024), SPO2_PI_MIN 0.003→0.002 (Schneider 2024 / JAMA 2024). 181/181 tests pass |
+| Evening | **ML server v4.3 merge:** Vừa merge backend v4.3 logic vào `ML code/ml/main.py` (1190 dòng) — đầy đủ HRV (HeartPy, RR accumulator, pNN20, reliability, LF/HF, Blaney thresholds) + ML BP. 10 endpoints, auth + rate-limit applied |
+
+---
+
+## Real-World Validation (mới!)
+
+**Đã validate backend v4.3 với 86 giây PPG data thật từ Firebase Realtime DB.**
+
+| Metric | Kết quả | Ghi chú |
+|--------|---------|---------|
+| Chunks xử lý OK | 16/16 (100%) | Không crash bất kỳ chunk nào |
+| HR median backend | 105.0 BPM | |
+| HR FFT independent | 104.7 BPM | Ground truth độc lập |
+| **Sai lệch HR** | **0.3 BPM (0.3%)** | ✅ Excellent accuracy |
+| Signal quality | 15 good, 1 fair | |
+| HRV reliability transition | low → medium → high | Threshold logic đúng |
+| Accumulated RR | 127 intervals (86s) | |
+| LF/HF | 3.12 | Computed when ≥60 RR |
+
+### Phát hiện quan trọng (cho firmware team)
+
+⚠️ **ESP32 firmware có bug timing:**
+- Claim `sample_rate=100` Hz trong field `r`
+- Thực tế chỉ ~28.5 Hz (median dt=57ms, không phải 10ms)
+- Nguyên nhân: buffering không đều giữa các samples
+- **Ảnh hưởng:** Backend bandpass + HeartPy sẽ tính sai HR nếu trust claim 100Hz → cần ESP32 gửi `sample_rate` thực tế
+
+⚠️ **SpO2 bị reject 100%** (ratio_r ngoài range [0.4, 2.0])
+- Có thể do chunk ngắn (5.3s @ 28Hz) bandpass filter thiếu "runway"
+- Hoặc Red LED firmware không ổn định
+
+---
+
+## Cấu trúc project hiện tại (local)
 
 ```
-ML code/
-├── main.py              # FastAPI server v3.0 — co san
-├── ml_models.py         # Toan bo ML logic — co san
-├── requirements.txt     # 6 dependencies — co san
-├── Dockerfile           # python:3.11-slim — co san
-├── render.yaml          # Render free tier deploy — co san
-├── BP_PROJECT_GUIDE.md  # Huong dan train voi PPG-BP dataset — co san
-├── CLAUDE.md            # Project instructions — co san
-│
-├── [THIEU] train_ppg_bp.py        # Training script voi real dataset
-├── [THIEU] models/                # Thu muc chua .pkl va .npz
-└── [THIEU] data/ppg-bp/           # PPG-BP Dataset (Liang et al. 2018)
+PPG monitor/
+├── Android code/
+├── Antigravity DX/
+├── Arduino code/              ← Firmware ESP32
+├── Backend code/               ← ⭐ Focus chính
+│   ├── main.py                 # v4.3, 900 dòng, 182 tests pass
+│   ├── test_main.py            # 182 tests
+│   ├── requirements.txt        # fastapi, heartpy, slowapi, loguru, ...
+│   ├── ISSUES.md               # 16 issues v4.0 (đã fix hết)
+│   ├── PROGRESS.md             # Progress chi tiết backend
+│   ├── replay_firebase_data.py # Script validate với real data
+│   ├── replay_firebase_report.md
+│   └── Older code/             # Backups qua các version
+├── DATA/
+│   └── PPG_BP database/        # 657 files training ML
+├── ML code/                    # Train scripts (ml/ trên GitHub)
+├── Model(Ref)/
+├── Paper/                      # References phân loại 3 tier
+├── Thesis/
+├── docs/
+│   └── pNN50_research_report.md  ← Research báo cáo 448 dòng
+├── .claude/
+│   ├── CLAUDE.md               # Project instructions
+│   ├── agents/                 # Custom agent definitions
+│   └── progress/               # Progress history
+├── PROGRESS.md                 # File này
+└── ppg-data-50e8b-default-rtdb-export.json  # Firebase export (369KB)
 ```
 
 ---
 
-## Phan tich chi tiet tung module
+## Cấu trúc repo GitHub (deployed)
 
-### ml_models.py (1047 dong) — OK
-
-**Feature Extraction — day du**
-
-- `extract_time_domain_features()`: 18 features gom mean, std, skewness, kurtosis, min, max, range,
-  rms, avg_ppi, std_ppi, rmssd, pnn50, num_peaks, peak_rate, zero_crossing_rate, slope_mean,
-  slope_std, energy
-- `extract_frequency_domain_features()`: 8 features — VLF/LF/HF band powers, LF/HF ratio,
-  total power, dominant frequency, spectral entropy, bandwidth — dung Welch PSD
-- `extract_morphological_features()`: 12 features — systolic amp, rise/fall time, pulse width,
-  area ratio, 1st/2nd derivative, waveform symmetry
-- `extract_features(ir, red, fs)`: entry point tich hop, tra ve PPGFeatures dataclass
-
-**Model Classes — co khung, chua co weights**
-
-- `ClassicalMLModel`: ho tro RF / GradientBoosting / SVR; co fallback rule-based khi chua train;
-  load tu `models/random_forest_models.pkl` (file nay CHUA TON TAI)
-- `DeepLearningModel`: numpy-only CNN-LSTM; load tu `models/cnn_lstm_weights.npz` (CHUA TON TAI);
-  voi random weights confidence chi dat 0.3
-- `TransformerModel`: numpy-only Multi-Head Self-Attention; load tu `models/transformer_weights.npz`
-  (CHUA TON TAI); voi random weights confidence 0.25
-- `EnsemblePredictor`: chi them DL va Transformer vao ensemble KHI `is_trained == True` — thiet ke
-  dung, tranh lam lech ket qua khi weights random
-
-**Training Utilities — chi co synthetic**
-
-- `generate_synthetic_training_data()`: tao PPG gia lap voi harmonic sine, co DC offset, co nhieu
-- `train_classical_models()`: train RF/GB/SVR voi sklearn, chay cross-validation 5-fold, luu .pkl
-- `train_ppg_bp.py`: KHONG TON TAI — day la missing piece quan trong nhat
-
-**Van de khi chua train:**
-
-Khi khoi dong server, `EnsemblePredictor` chi gom 1 model (`ClassicalMLModel` voi rule-based
-fallback). Tat ca du doan BP, stress, AFib dua tren cac cong thuc rule-of-thumb khong co scientific
-validation cu the.
-
-### main.py (509 dong) — PHAN
-
-**Endpoints da implement:**
-
-| Endpoint | Trang thai |
-|----------|-----------|
-| `GET /` | OK |
-| `POST /api/ppg/upload` | OK — co ML prediction tich hop |
-| `POST /api/ml/predict` | OK — ML-only mode |
-| `POST /api/ml/train` | OK — train tren synthetic data |
-| `GET /api/ml/models` | OK — liet ke model status |
-| `GET /api/ppg/history/{device_id}` | OK |
-| `GET /api/ppg/latest/{device_id}` | OK |
-| `DELETE /api/ppg/history/{device_id}` | OK |
-| `GET /api/ppg/stats/{device_id}` | THIEU — khong co endpoint nay |
-
-**Xu ly tin hieu co san:**
-
-- `bandpass_filter()`: Butterworth [0.5–5.0 Hz], order 4
-- `lowpass_filter()`: Butterworth cutoff 0.5 Hz, order 4
-- `calculate_heart_rate()`: find_peaks + valid interval filter; tra ve HR + peaks + HRV SDNN
-- `calculate_spo2()`: dung cong thuc `110 − 25×R` — KHAC VOI ROADMAP (`104 − 17×R`)
-- `assess_signal_quality()`: tinh SNR + BPM range + amplitude — don gian, khong dung SQA pipeline
-  tu `ppg_system/pipeline/ppg_sqa.py`
-
-**HRV tren main.py:** Chi tinh duoc SDNN. RMSSD, pNN50, LF/HF KHONG CO trong response
-`PPGResult`. Cac gia tri nay co trong `ml_models.py` nhung khong duoc expose qua model response chinh.
+```
+Danh24122003/ppg-server (main)
+├── backend/
+│   ├── main.py          # ⚠️ Cần sync với local main.py v4.3 (chưa push)
+│   ├── test_main.py
+│   ├── requirements.txt
+│   └── Dockerfile
+├── ml/
+│   ├── main.py          # LIVE
+│   ├── ml_models.py
+│   ├── train_ppg_bp.py
+│   ├── models/          # RF 2.55MB + SVR 67KB
+│   ├── requirements.txt
+│   └── Dockerfile
+├── render.yaml
+└── .gitignore
+```
 
 ---
 
-## Doi chieu voi Roadmap (CLAUDE.md — Giai doan 1 & 2)
+## Deploy Status
 
-### Giai doan 1 — Core
-
-| Task | Trang thai | Ghi chu |
-|------|-----------|---------|
-| HRV day du: RMSSD + pNN50 + LF/HF | PHAN | ml_models.py co RMSSD/pNN50 trong time features; main.py chi tra SDNN |
-| HeartPy adaptive threshold peak detection | CHUA | Dang dung scipy.find_peaks don gian; khong co spline interpolation |
-| SpO2 formula: `104 − 17×R` | CHUA | main.py dang dung `110 − 25×R`; ml_models.py dung rule-based estimate |
-| SQA pipeline tich hop | CHUA | `assess_signal_quality()` la SNR don gian; khong dung `ppg_sqa.py` |
-| Endpoint `/api/ppg/stats/{device_id}` | CHUA | Endpoint nay khong ton tai |
-
-**Hoan thanh Giai doan 1: 0/5**
-
-### Giai doan 2 — Chat luong
-
-| Task | Trang thai | Ghi chu |
-|------|-----------|---------|
-| Tach module (models, signal_processing, storage) | PHAN | ml_models.py tach rieng tot; main.py van gom signal processing + API + storage |
-| Pytest coverage | CHUA | Khong co file test nao |
-| Logging (loguru) | CHUA | Dang dung stdlib `logging`; khong co loguru |
-| CORS siet lai | CHUA | `allow_origins=["*"]` — mo hoan toan |
-
-**Hoan thanh Giai doan 2: 0/4**
-
-### Giai doan 3 — Nang cao
-
-| Task | Trang thai | Ghi chu |
-|------|-----------|---------|
-| BP model training + tich hop | PHAN | Khung co, train_ppg_bp.py va data thieu |
-| Firebase Firestore | CHUA | Van dung in-memory dict |
-| WebSocket streaming | CHUA | Khong co |
-| Dashboard web | CHUA | Khong co |
-
-**Hoan thanh Giai doan 3: 0/4**
+| Service | URL | Trạng thái |
+|---------|-----|-----------|
+| `ppg-ml` | `ppg-ml.onrender.com` | ⏳ Transition v3.0 → **v4.3** (code merged, chờ push) |
+| `ppg-backend` | `ppg-backend-udze.onrender.com` | ✅ **LIVE v4.3** |
 
 ---
 
-## Files da thay doi gan day
+## Vấn đề tồn đọng
 
-| File | Sua lan cuoi | Noi dung |
-|------|-------------|---------|
-| CLAUDE.md | 2026-04-20 05:49 | Project instructions va kien truc |
-| main.py | 2026-04-19 14:33 | FastAPI server v3.0 voi ML integration |
-| ml_models.py | 2026-04-19 14:33 | Toan bo ML pipeline va feature extraction |
-| requirements.txt | 2026-04-19 07:25 | 6 dependencies (fastapi, uvicorn, numpy, scipy, pydantic, scikit-learn) |
-| render.yaml | 2026-04-19 07:25 | Deploy config |
-| Dockerfile | 2026-04-19 07:25 | python:3.11-slim container |
-| BP_PROJECT_GUIDE.md | 2026-04-19 07:19 | Huong dan tich hop PPG-BP dataset |
+### Ưu tiên cao
+1. **ML v4.3 chưa deploy Render** — code merged xong, chờ push để LIVE thay v3.0
+2. **P0 còn 1 bug:** `clear_history` không acquire `device_lock` (race với upload đang ở Phase B) — documented trong `Backend code/PROGRESS.md`
 
----
+### Ưu tiên trung bình
+3. **DB in-memory** — Render restart mất data, cần migrate Firebase Firestore
+4. **Sync GitHub:** sync `ml/main.py` v4.3 + `backend/main.py` v4.3 lên repo
 
-## Van de ton dong
+### Ưu tiên thấp
+5. Dashboard web
+6. WebSocket streaming
+7. Deep Learning BP (cần GPU)
 
-### Loi logic / sai lech so voi spec
-
-1. **SpO2 sai cong thuc**: `main.py:222` dang dung `spo2 = 110.0 - 25.0 * R`. Roadmap va paper
-   `020024_1_online.pdf` yeu cau `104 − 17×R`. Can sua.
-
-2. **HRV khong day du trong response chinh**: `PPGResult` chi co `hrv_sdnn`; RMSSD, pNN50, LF/HF
-   chi co trong output cua `ml_models.py` (duong ML). Nguoi dung goi `/api/ppg/upload` se khong
-   nhan duoc HRV day du tru khi doc `ml_predictions`.
-
-3. **SpO2 trong ML rule-based khong chinh xac**: `ml_models.py:447-451` tinh SpO2 tu systolic
-   amplitude, khong phai tu ty le IR/Red. Day la approximation rat thu va se sai lech lon.
-
-### File con thieu
-
-4. **`train_ppg_bp.py` khong ton tai**: CLAUDE.md mo ta day du file nay nhung no chua duoc tao.
-   Day la buoc bat buoc truoc khi co bat ky ket qua BP co nghia.
-
-5. **Thu muc `models/` khong ton tai**: Khong co model file nao (.pkl, .npz, .pt). Tat ca 3 model
-   class deu chay o che do fallback/demo.
-
-6. **PPG-BP Dataset chua tai**: `data/ppg-bp/` khong ton tai. Can tai thu cong tu Figshare.
-
-### Chat luong code
-
-7. **`import json` khong dung** trong `ml_models.py:12` — harmless nhung can don dep.
-
-8. **`fall_times` duoc khai bao va su dung** trong `extract_morphological_features()` nhung
-   CLAUDE.md ghi la "unused" — kiem tra lai, co ve CLAUDE.md ghi sai. `fall_times` duoc ghi vao
-   `features[3]` va dung tinh waveform symmetry, vay la DUNG DUOC.
-
-9. **Khong co authentication**: endpoint `/api/ml/train` co the bi goi tu bat ky ai co URL.
-
-10. **CORS mo hoan toan**: `allow_origins=["*"]` — can siet khi production.
+### Issues đã đóng (mới — 2026-04-26)
+- ✅ **SpO2 ratio_r threshold quá rộng** → tightened 2.0 → 1.4 (Blaney 2024 PMC12238718)
+- ✅ **PI threshold quá strict** → loosened 0.3% → 0.2% (Schneider 2024 / JAMA 2024 PubMed 38109495)
+- ✅ **ML server v3.0 thiếu HRV improvements** → đã merge v4.3 logic vào `ml/main.py`
+- ✅ **Calibration finger detection bug v4.0.4** → fix v4.0.8 (CALIB_THRESHOLD vs IR_MIN)
+- ✅ **Backend chưa deploy Render** → LIVE v4.3 tại `ppg-backend-udze.onrender.com`
+- ✅ **ESP32 firmware bug timing** → v4.0.9 fs=50Hz stable
 
 ---
 
-## Buoc tiep theo duoc de xuat
+## Testing Strategy
 
-1. **[CAO] Sua SpO2 formula trong `main.py`**: Doi `110.0 - 25.0 * R` thanh `104.0 - 17.0 * R`
-   va clip ve `[85.0, 100.0]`. Mot dong sua, anh huong lon den do chinh xac.
+### Tier 1 — Synthetic unit/integration tests ✅
+- 182 tests pass
+- Sine wave @ 72 BPM, 100Hz, 500 samples
+- Coverage: signal processing, API endpoints, auth, rate limit, concurrency
 
-2. **[CAO] Tao `train_ppg_bp.py`**: Theo mo ta trong `BP_PROJECT_GUIDE.md` va `CLAUDE.md`. Tai
-   PPG-BP Dataset tu Figshare, resample 1000 Hz -> 100 Hz, train RF/GB/SVR, luu vao
-   `models/random_forest_models.pkl`.
+### Tier 2 — Real data replay ✅ (mới!)
+- 86s PPG từ Firebase user
+- HR error 0.3 BPM vs FFT ground truth
+- Không crash, quality assessment đúng
 
-3. **[CAO] Bo sung HRV day du vao `PPGResult`**: Them `rmssd`, `pnn50`, `lf_power`, `hf_power`,
-   `lf_hf_ratio` vao response cua `/api/ppg/upload` — hien tai chi co `hrv_sdnn`.
+### Tier 3 — Hardware-in-loop ⏳
+- Cần ESP32 + MAX30102 thật
+- So sánh với oximeter y tế (Masimo, Nonin)
+- Scope của đồ án cuối
 
-4. **[TRUNG BINH] Tich hop SQA pipeline**: Import va goi `ppg_sqa.py` tu `ppg_system/pipeline/`
-   thay cho `assess_signal_quality()` don gian hien tai.
+---
 
-5. **[TRUNG BINH] Them endpoint `/api/ppg/stats/{device_id}`**: Tinh HR/SpO2 mean/min/max 24h
-   tu `readings_db`.
+## Disclaimer y tế
 
-6. **[TRUNG BINH] Viet pytest**: Toi thieu test `extract_features()`, `calculate_heart_rate()`,
-   `calculate_spo2()`, `train_classical_models()` voi synthetic data.
-
-7. **[THAP] Don dep `import json` khong dung** trong `ml_models.py`.
-
-8. **[THAP] Them loguru**: Thay `import logging` bang `from loguru import logger`.
+> **QUAN TRỌNG:** Dự án này KHÔNG phải thiết bị y tế được chứng nhận (FDA/CE/BYT).  
+> Kết quả HR/SpO2/HRV/BP chỉ mang tính tham khảo / học tập.  
+> BP accuracy ±8–15 mmHg (vượt chuẩn IEEE cuff-less ±5 mmHg) — phải đính kèm disclaimer trong mọi response.
