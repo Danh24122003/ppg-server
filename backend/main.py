@@ -108,11 +108,13 @@ SPO2_MAX_VALID = 100.0
 # - R range [0.4, 1.4] cover SpO2 70-100% theo Blaney et al. 2024
 #   (J Biomed Opt 29(S3):S33313, PMC12238718) — peer-reviewed measurement
 # - R > 1.4 = SpO2 < 70%, hầu như không sinh lý → reject là artifact
-# - PI > 0.2% an toàn vs clinical concern 0.5% (Schneider 2024 JECCM,
-#   JAMA 2024 PubMed 38109495)
+# - PI > 0.2% an toàn vs clinical concern threshold 0.6% — Schneider, Clark & Bailey
+#   2024 JECCM 8:21 doi:10.21037/jeccm-24-13: PI<0.6 increases OR for SpO2/SaO2
+#   discrepancy ≥5% to 3.36 (95% CI 1.25-8.98, P=0.02). Project chooses 0.2% as
+#   conservative hard-reject; Schneider only recommends "wary of interpreting".
 SPO2_RATIO_MIN = 0.4   # Blaney 2024 — physical lower bound cho SpO2 ≤ 100%
 SPO2_RATIO_MAX = 1.4   # Blaney 2024 — physical upper bound cho SpO2 ≥ 70%
-SPO2_PI_MIN = 0.002    # 0.2% — conservative vs Schneider/JAMA clinical concern 0.5%
+SPO2_PI_MIN = 0.002    # 0.2% — conservative vs Schneider 2024 JECCM concern 0.6%
 SPO2_SMOOTH_WINDOW = 5
 
 AC_DC_MIN_IR = 0.001
@@ -166,6 +168,8 @@ class PPGReading(BaseModel):
     @field_validator("ir_values", "red_values")
     @classmethod
     def _v_arr(cls, v: List[int]) -> List[int]:
+        if len(v) < MIN_SAMPLES:
+            raise ValueError(f"Cần ít nhất {MIN_SAMPLES} mẫu")
         if len(v) > MAX_SAMPLES:
             raise ValueError(f"Tối đa {MAX_SAMPLES} mẫu mỗi lần gửi")
         return v
@@ -250,9 +254,18 @@ def lowpass_filter(signal: np.ndarray, fs: int,
 # HeartPy Peak Detection + RR Accumulator
 # ============================================================
 def _reject_rr_outliers(rr_ms: np.ndarray) -> np.ndarray:
-    """Loại RR nằm ngoài ±20% median(RR). Robust hơn absolute threshold với batch ngắn."""
+    """2-stage outlier rejection per Task Force 1996 + van Gent 2019.
+
+    Stage 1: Physiological gate [300, 2000] ms (=[30, 200] BPM)
+    Stage 2: ±20% median quotient
+    """
     if len(rr_ms) == 0:
         return rr_ms
+    # Stage 1: physiological range
+    rr_ms = rr_ms[(rr_ms >= 300) & (rr_ms <= 2000)]
+    if len(rr_ms) == 0:
+        return rr_ms
+    # Stage 2: median quotient
     med = float(np.median(rr_ms))
     lo = med * (1.0 - RR_OUTLIER_TOLERANCE)
     hi = med * (1.0 + RR_OUTLIER_TOLERANCE)
@@ -302,7 +315,10 @@ def _compute_hrv_metrics(rr_ms: np.ndarray) -> HRVMetrics:
             mean_nn_ms=0.0, rr_count=n,
             reliability="low",
         )
-    sdnn = float(np.std(rr_ms, ddof=1))
+    # Population std (ddof=0) per Task Force 1996 standard definition:
+    # "SDNN: standard deviation of all NN intervals" (Circulation 93:1043, 1996, PMID 8598068).
+    # HeartPy (van Gent et al. 2019) implements ddof=0 by default. NeuroKit2 deviates with ddof=1.
+    sdnn = float(np.std(rr_ms, ddof=0))
     diff_nn = np.diff(rr_ms)
     rmssd = float(np.sqrt(np.mean(diff_nn ** 2)))
     # Task Force 1996 / Ewing 1984: chia (N-1) = len(diff_nn)
@@ -541,12 +557,18 @@ def calculate_spo2_v23(ir: np.ndarray, red: np.ndarray,
     if acdc_ir < SPO2_PI_MIN:
         return None, R, acdc_ir, acdc_red, "low_perfusion_index"
 
-    if R < 0.7:
-        spo2 = 105.5 - 17.0 * R
-    elif R < 1.1:
-        spo2 = 102.0 - 19.5 * R
-    else:
-        spo2 = 108.0 - 23.0 * R
+    # Quadratic calibration from Maxim Integrated MAXREFDES117 reference design firmware,
+    # embedded in SparkFun MAX3010x Arduino library, spo2_algorithm.cpp (MIT license,
+    # copyright Maxim Integrated). Coefficients are empirically calibrated for the
+    # 660/880 nm wavelength pair (MAX30102), suitable for finger reflectance mode.
+    # NOTE: Manufacturer documentation explicitly notes these are "approximations,
+    # not clinically validated values" - see MAXREFDES117 documentation. Independent
+    # clinical validation requires controlled hypoxia study with co-oximetry reference
+    # (ISO 80601-2-61:2018), outside scope of this engineering pilot.
+    # Theoretical motivation: Modified Beer-Lambert law gives fractional SpO2=f(R) form
+    # closely approximated by quadratic in physiological range (Blaney et al. 2024,
+    # J Biomed Opt 29(S3):S33313, PMC12238718).
+    spo2 = -45.060 * R * R + 30.354 * R + 94.845
 
     spo2 = float(np.clip(spo2, SPO2_MIN_VALID, SPO2_MAX_VALID))
     return round(spo2, 1), round(R, 3), round(acdc_ir, 5), round(acdc_red, 5), "ok"
@@ -931,15 +953,17 @@ def clear_history(
 ):
     """Xóa lịch sử, SpO2 buffer, overlap buffer và RR accumulator của device."""
     device_id = _validate_device_id(device_id)
-    with _state_lock:
-        keys = list(device_index.get(device_id, []))
-        for k in keys:
-            readings_db.pop(k, None)
-        device_index.pop(device_id, None)
-        spo2_history.pop(device_id, None)
-        overlap_buffer.pop(device_id, None)
-        rr_accumulator.pop(device_id, None)
-        _device_locks.pop(device_id, None)
+    device_lock = _get_device_lock(device_id)
+    with device_lock:
+        with _state_lock:
+            keys = list(device_index.get(device_id, []))
+            for k in keys:
+                readings_db.pop(k, None)
+            device_index.pop(device_id, None)
+            spo2_history.pop(device_id, None)
+            overlap_buffer.pop(device_id, None)
+            rr_accumulator.pop(device_id, None)
+            _device_locks.pop(device_id, None)
     return {"device_id": device_id, "deleted": len(keys)}
 
 

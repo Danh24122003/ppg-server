@@ -6,6 +6,7 @@ Dự đoán: Huyết áp (BP), SpO2, Nhịp tim (HR/HRV/AFib), Stress, Glucose
 
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, welch
+from scipy.interpolate import interp1d
 from scipy.stats import skew, kurtosis
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -229,10 +230,74 @@ def extract_time_domain_features(signal: np.ndarray, peaks: np.ndarray,
     return features
 
 
+def _hrv_lf_hf_from_rr(ir_filtered: np.ndarray, fs: float) -> Tuple[float, float, float]:
+    """Compute HRV VLF/LF/HF from RR tachogram per Task Force 1996.
+
+    Steps:
+    1. Detect peaks in filtered IR signal (distance=fs*0.4 → max ~150 BPM)
+    2. Compute RR intervals (ms)
+    3. Cubic spline interpolate to uniform 4 Hz grid
+    4. Welch PSD (Hann window, nperseg=256)
+    5. Trapezoidal integration over Task Force frequency bands:
+       - VLF: 0.0033-0.04 Hz
+       - LF:  0.04-0.15 Hz
+       - HF:  0.15-0.4 Hz
+
+    Reference: Task Force 1996, Circulation 93:1043, PMID 8598068.
+    """
+    peaks, _ = find_peaks(ir_filtered, distance=int(fs * 0.4))
+    if len(peaks) < 10:
+        return 0.0, 0.0, 0.0
+    rr_ms = np.diff(peaks) / fs * 1000.0
+
+    # Stage 1: Physiological range filter [300-2000 ms] = [30-200 BPM]
+    # Per Task Force 1996 (Circulation 93:1043, PMID 8598068)
+    physio_mask = (rr_ms >= 300) & (rr_ms <= 2000)
+    if physio_mask.sum() < 9:  # cần ít nhất 9 valid RR (= 10 peaks)
+        return 0.0, 0.0, 0.0
+    rr_ms = rr_ms[physio_mask]
+
+    # Stage 2: HeartPy quotient filter ±20% successive
+    # Per van Gent et al. 2019 + Piskorski & Guzik 2005
+    if len(rr_ms) >= 2:
+        ratios = rr_ms[1:] / rr_ms[:-1]
+        quotient_mask = np.concatenate([[True], (ratios >= 0.8) & (ratios <= 1.2)])
+        rr_ms = rr_ms[quotient_mask]
+
+    if len(rr_ms) < 9:
+        return 0.0, 0.0, 0.0
+
+    t = np.cumsum(rr_ms) / 1000.0
+    fs_rr = 4.0
+    if t[-1] - t[0] < 1.0 / fs_rr:
+        return 0.0, 0.0, 0.0
+    t_uniform = np.arange(t[0], t[-1], 1.0 / fs_rr)
+    if len(t_uniform) < 16:
+        return 0.0, 0.0, 0.0
+    rr_uniform = interp1d(
+        t, rr_ms, kind='cubic',
+        bounds_error=False,
+        fill_value=(float(rr_ms[0]), float(rr_ms[-1])),
+    )(t_uniform)
+    nperseg = min(256, len(rr_uniform))
+    freqs_rr, psd_rr = welch(rr_uniform, fs=fs_rr, nperseg=nperseg, window='hann')
+
+    def _band_power(low: float, high: float) -> float:
+        mask = (freqs_rr >= low) & (freqs_rr < high)
+        if mask.sum() < 2:
+            return 0.0
+        return float(np.trapezoid(psd_rr[mask], freqs_rr[mask]))
+
+    vlf = _band_power(0.0033, 0.04)
+    lf = _band_power(0.04, 0.15)
+    hf = _band_power(0.15, 0.4)
+    return vlf, lf, hf
+
+
 def extract_frequency_domain_features(signal: np.ndarray, fs: int) -> np.ndarray:
     """
     Trích xuất 8 feature miền tần số bằng Welch PSD:
-    - VLF power (0.003-0.04 Hz), LF power (0.04-0.15 Hz), HF power (0.15-0.4 Hz)
+    - VLF/LF/HF computed from RR tachogram per Task Force 1996 (NOT raw PPG signal)
     - LF/HF ratio, total power, dominant frequency, spectral entropy, bandwidth
     """
     features = np.zeros(NUM_FREQ_FEATURES)
@@ -246,14 +311,15 @@ def extract_frequency_domain_features(signal: np.ndarray, fs: int) -> np.ndarray
     if len(psd) == 0:
         return features
 
-    # Band powers
+    # Band powers helper for non-HRV bands (total, dominant freq, etc.)
     def band_power(f_low: float, f_high: float) -> float:
         mask = (freqs >= f_low) & (freqs <= f_high)
         return float(np.trapezoid(psd[mask], freqs[mask])) if np.any(mask) else 0.0
 
-    vlf = band_power(0.003, 0.04)
-    lf = band_power(0.04, 0.15)
-    hf = band_power(0.15, 0.4)
+    # VLF/LF/HF từ RR tachogram per Task Force 1996 (PMID 8598068):
+    # PPG signal đã bandpass [0.5, 4.0Hz] nên 3 dải VLF/LF/HF (0.003-0.4Hz)
+    # luôn ≈ 0 nếu tính trên PPG. HRV LF/HF phải tính trên chuỗi RR (tachogram).
+    vlf, lf, hf = _hrv_lf_hf_from_rr(signal, fs)
     total = band_power(freqs[0], freqs[-1])
 
     features[0] = vlf

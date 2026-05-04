@@ -46,6 +46,7 @@ from ml_models import (
     train_classical_models,
     TARGET_NAMES,
 )
+from calibration_db import get_default_db as _get_calib_db
 
 try:
     import heartpy as hp
@@ -123,11 +124,13 @@ SPO2_MAX_VALID = 100.0
 # - R range [0.4, 1.4] cover SpO2 70-100% theo Blaney et al. 2024
 #   (J Biomed Opt 29(S3):S33313, PMC12238718) — peer-reviewed measurement
 # - R > 1.4 = SpO2 < 70%, hầu như không sinh lý → reject là artifact
-# - PI > 0.2% an toàn vs clinical concern 0.5% (Schneider 2024 JECCM,
-#   JAMA 2024 PubMed 38109495)
+# - PI > 0.2% an toàn vs clinical concern threshold 0.6% — Schneider, Clark & Bailey
+#   2024 JECCM 8:21 doi:10.21037/jeccm-24-13: PI<0.6 increases OR for SpO2/SaO2
+#   discrepancy ≥5% to 3.36 (95% CI 1.25-8.98, P=0.02). Project chooses 0.2% as
+#   conservative hard-reject; Schneider only recommends "wary of interpreting".
 SPO2_RATIO_MIN = 0.4   # Blaney 2024 — physical lower bound cho SpO2 ≤ 100%
 SPO2_RATIO_MAX = 1.4   # Blaney 2024 — physical upper bound cho SpO2 ≥ 70%
-SPO2_PI_MIN = 0.002    # 0.2% — conservative vs Schneider/JAMA clinical concern 0.5%
+SPO2_PI_MIN = 0.002    # 0.2% — conservative vs Schneider 2024 JECCM concern 0.6%
 SPO2_SMOOTH_WINDOW = 5
 
 AC_DC_MIN_IR = 0.001
@@ -181,6 +184,8 @@ class PPGReading(BaseModel):
     @field_validator("ir_values", "red_values")
     @classmethod
     def _v_arr(cls, v: List[int]) -> List[int]:
+        if len(v) < MIN_SAMPLES:
+            raise ValueError(f"Cần ít nhất {MIN_SAMPLES} mẫu")
         if len(v) > MAX_SAMPLES:
             raise ValueError(f"Tối đa {MAX_SAMPLES} mẫu mỗi lần gửi")
         return v
@@ -256,6 +261,56 @@ class MLPredictionRequest(BaseModel):
         return v
 
 
+class CalibrationRequest(BaseModel):
+    """Request capture per-subject calibration anchor.
+
+    Subject đo cuff Omron VÀ PPG đồng thời (hoặc cách <2 phút) lần đầu sử dụng.
+    Server compute model prediction → offset = real - predicted, lưu DB per device_id.
+    """
+    device_id: str
+    ir_values: List[int]
+    red_values: List[int]
+    sample_rate: int = 100
+    sbp_real: float       # cuff Omron MEAN(reading 2, 3) — drop reading 1
+    dbp_real: float
+    notes: str = ""
+
+    @field_validator("device_id")
+    @classmethod
+    def _v_id(cls, v: str) -> str:
+        return _check_device_id(v)
+
+    @field_validator("sample_rate")
+    @classmethod
+    def _v_sr(cls, v: int) -> int:
+        if not (MIN_SAMPLE_RATE <= v <= MAX_SAMPLE_RATE):
+            raise ValueError(f"sample_rate phải từ {MIN_SAMPLE_RATE}-{MAX_SAMPLE_RATE} Hz")
+        return v
+
+    @field_validator("ir_values", "red_values")
+    @classmethod
+    def _v_arr(cls, v: List[int]) -> List[int]:
+        if len(v) < 100:
+            raise ValueError("Calibration cần ≥100 mẫu (≥1 giây tín hiệu)")
+        if len(v) > MAX_SAMPLES:
+            raise ValueError(f"Tối đa {MAX_SAMPLES} mẫu")
+        return v
+
+    @field_validator("sbp_real")
+    @classmethod
+    def _v_sbp(cls, v: float) -> float:
+        if not (60 <= v <= 220):
+            raise ValueError(f"sbp_real {v} ngoài range physiological [60,220] mmHg")
+        return v
+
+    @field_validator("dbp_real")
+    @classmethod
+    def _v_dbp(cls, v: float) -> float:
+        if not (40 <= v <= 130):
+            raise ValueError(f"dbp_real {v} ngoài range [40,130] mmHg")
+        return v
+
+
 class TrainRequest(BaseModel):
     """Request train model với dữ liệu synthetic"""
     model_type: str = "random_forest"
@@ -317,9 +372,18 @@ def lowpass_filter(signal: np.ndarray, fs: int,
 # HeartPy Peak Detection + RR Accumulator
 # ============================================================
 def _reject_rr_outliers(rr_ms: np.ndarray) -> np.ndarray:
-    """Loại RR nằm ngoài ±20% median(RR). Robust hơn absolute threshold với batch ngắn."""
+    """2-stage outlier rejection per Task Force 1996 + van Gent 2019.
+
+    Stage 1: Physiological gate [300, 2000] ms (=[30, 200] BPM)
+    Stage 2: ±20% median quotient
+    """
     if len(rr_ms) == 0:
         return rr_ms
+    # Stage 1: physiological range
+    rr_ms = rr_ms[(rr_ms >= 300) & (rr_ms <= 2000)]
+    if len(rr_ms) == 0:
+        return rr_ms
+    # Stage 2: median quotient
     med = float(np.median(rr_ms))
     lo = med * (1.0 - RR_OUTLIER_TOLERANCE)
     hi = med * (1.0 + RR_OUTLIER_TOLERANCE)
@@ -369,7 +433,10 @@ def _compute_hrv_metrics(rr_ms: np.ndarray) -> HRVMetrics:
             mean_nn_ms=0.0, rr_count=n,
             reliability="low",
         )
-    sdnn = float(np.std(rr_ms, ddof=1))
+    # Population std (ddof=0) per Task Force 1996 standard definition:
+    # "SDNN: standard deviation of all NN intervals" (Circulation 93:1043, 1996, PMID 8598068).
+    # HeartPy (van Gent et al. 2019) implements ddof=0 by default. NeuroKit2 deviates with ddof=1.
+    sdnn = float(np.std(rr_ms, ddof=0))
     diff_nn = np.diff(rr_ms)
     rmssd = float(np.sqrt(np.mean(diff_nn ** 2)))
     # Task Force 1996 / Ewing 1984: chia (N-1) = len(diff_nn)
@@ -608,12 +675,18 @@ def calculate_spo2_v23(ir: np.ndarray, red: np.ndarray,
     if acdc_ir < SPO2_PI_MIN:
         return None, R, acdc_ir, acdc_red, "low_perfusion_index"
 
-    if R < 0.7:
-        spo2 = 105.5 - 17.0 * R
-    elif R < 1.1:
-        spo2 = 102.0 - 19.5 * R
-    else:
-        spo2 = 108.0 - 23.0 * R
+    # Quadratic calibration from Maxim Integrated MAXREFDES117 reference design firmware,
+    # embedded in SparkFun MAX3010x Arduino library, spo2_algorithm.cpp (MIT license,
+    # copyright Maxim Integrated). Coefficients are empirically calibrated for the
+    # 660/880 nm wavelength pair (MAX30102), suitable for finger reflectance mode.
+    # NOTE: Manufacturer documentation explicitly notes these are "approximations,
+    # not clinically validated values" - see MAXREFDES117 documentation. Independent
+    # clinical validation requires controlled hypoxia study with co-oximetry reference
+    # (ISO 80601-2-61:2018), outside scope of this engineering pilot.
+    # Theoretical motivation: Modified Beer-Lambert law gives fractional SpO2=f(R) form
+    # closely approximated by quadratic in physiological range (Blaney et al. 2024,
+    # J Biomed Opt 29(S3):S33313, PMC12238718).
+    spo2 = -45.060 * R * R + 30.354 * R + 94.845
 
     spo2 = float(np.clip(spo2, SPO2_MIN_VALID, SPO2_MAX_VALID))
     return round(spo2, 1), round(R, 3), round(acdc_ir, 5), round(acdc_red, 5), "ok"
@@ -859,12 +932,39 @@ def upload_ppg_data(
         perfusion_index = round(acdc_ir * 100, 2)
         quality = assess_signal_quality(ir, filtered_ir, peaks, fs)
 
-        # ML prediction (BP)
+        # ML prediction (BP) + per-subject calibration offset (PracticalBP)
         try:
             ml_preds = _run_ml_prediction(ir, red, fs, "ensemble")
         except Exception as e:
             logger.warning("ML prediction lỗi: {}", e)
             ml_preds = None
+
+        # Apply calibration offset nếu device đã calibrate
+        # Lý do: model degenerate (predict const ~118.3 cho reflectance MAX30102) →
+        # cần per-subject offset = BP_cuff_real - BP_predicted để bù subject variance.
+        if ml_preds and "blood_pressure" in ml_preds:
+            try:
+                bp_raw = ml_preds["blood_pressure"]
+                calib = _get_calib_db().apply_offset(
+                    reading.device_id,
+                    sbp_pred=float(bp_raw.get("systolic", 0)),
+                    dbp_pred=float(bp_raw.get("diastolic", 0)),
+                )
+                # Replace BP với calibrated values
+                ml_preds["blood_pressure"] = {
+                    **bp_raw,
+                    "systolic": calib["sbp_calibrated"],
+                    "diastolic": calib["dbp_calibrated"],
+                    "calibrated": calib["calibrated"],
+                    "anchor_age_days": calib["anchor_age_days"],
+                }
+                if not calib["calibrated"]:
+                    ml_preds["blood_pressure"]["warning"] = (
+                        "Device chưa calibrate — accuracy giảm, kết quả có thể lệch ±15 mmHg. "
+                        "Gọi POST /api/ml/calibrate với cuff Omron đo cùng lúc."
+                    )
+            except Exception as e:
+                logger.warning("Calibration apply lỗi: {}", e)
 
         if quality == "poor":
             logger.warning("Poor signal | device={} hr={} spo2={}",
@@ -1055,6 +1155,136 @@ def list_models():
     }
 
 
+# ============================================================
+# Per-subject Calibration endpoints (PracticalBP IMWUT 2025 approach)
+# ============================================================
+
+@app.post("/api/ml/calibrate")
+@limiter.limit("10/minute")
+def calibrate_anchor(
+    request: Request,
+    req: CalibrationRequest,
+    _auth: None = Depends(_require_token),
+):
+    """
+    Capture per-subject calibration anchor.
+
+    Subject đo cuff Omron + PPG đồng thời (hoặc gap < 2 phút). Server compute
+    model prediction trên PPG, lưu offset = real - predicted vào DB per device_id.
+    Lần sau khi `/api/ppg/upload` cho cùng device_id, offset sẽ được áp tự động.
+
+    Lý do: model RF/SVR hiện tại bị regression-to-mean degeneracy (predict const
+    ~118.3 cho mọi reflectance MAX30102 input). Per-subject offset bù subject-to-
+    subject variance, giảm MAE từ ~14.7 xuống ~7-9 mmHg expected.
+    """
+    if len(req.ir_values) != len(req.red_values):
+        raise HTTPException(400, "Số mẫu IR và Red phải bằng nhau")
+
+    ir = np.array(req.ir_values, dtype=float)
+    red = np.array(req.red_values, dtype=float)
+
+    if np.mean(ir) < MIN_FINGER_DC or np.mean(red) < MIN_FINGER_DC:
+        raise HTTPException(400, "PPG signal quá yếu để calibrate — finger placement sai?")
+
+    # AC% sanity check — reject nếu signal là noise (AC < noise floor)
+    # Lý do: với model degenerate (predict const 118.3), calibration trên noise vẫn
+    # ra offset = real - 118.3, "trông như calibrate được" nhưng thực ra subject chưa
+    # thực sự được anchor → false confidence. Reject để force user re-collect.
+    dc_ir = float(np.mean(ir))
+    ac_ir_pp = float(np.ptp(ir - np.mean(ir)))  # peak-to-peak after DC removal
+    ac_pct = (ac_ir_pp / dc_ir * 100) if dc_ir > 0 else 0.0
+    if ac_pct < 0.3:
+        raise HTTPException(
+            400,
+            f"AC%={ac_pct:.3f}% quá thấp để calibrate (cần ≥ 0.3%, ideal ≥ 1%). "
+            f"Nguyên nhân: cold finger / vasoconstriction / sensor mất tiếp xúc / motion artifact. "
+            f"Hành động: warm-up tay 30-60s + đổi sang ngón giữa + adjust pressure → retry."
+        )
+
+    # Run model prediction trên PPG signal
+    try:
+        ml_preds = _run_ml_prediction(ir, red, req.sample_rate, "ensemble")
+    except Exception as e:
+        raise HTTPException(500, f"Model prediction lỗi: {e}")
+
+    bp = (ml_preds or {}).get("blood_pressure") or {}
+    sbp_pred = float(bp.get("systolic", 0))
+    dbp_pred = float(bp.get("diastolic", 0))
+    if sbp_pred <= 0 or dbp_pred <= 0:
+        raise HTTPException(500, "Model không trả BP prediction hợp lệ — không thể calibrate")
+
+    # Save vào CalibrationDB
+    try:
+        record = _get_calib_db().save_anchor(
+            device_id=req.device_id,
+            sbp_real=req.sbp_real,
+            dbp_real=req.dbp_real,
+            sbp_pred=sbp_pred,
+            dbp_pred=dbp_pred,
+            notes=req.notes,
+        )
+    except ValueError as e:
+        # Offset vượt physiological range — refuse
+        raise HTTPException(400, str(e))
+
+    logger.info(
+        "Calibrated device={} real={}/{} pred={:.1f}/{:.1f} -> offset={:+.1f}/{:+.1f}",
+        req.device_id, req.sbp_real, req.dbp_real,
+        sbp_pred, dbp_pred, record["offset_sbp"], record["offset_dbp"]
+    )
+
+    return {
+        "status": "calibrated",
+        "device_id": req.device_id,
+        "anchor": record,
+        "note": "Subsequent /api/ppg/upload calls cho device này sẽ tự động áp offset này.",
+    }
+
+
+@app.get("/api/ml/calibrate/{device_id}")
+@limiter.limit("60/minute")
+def get_calibration(
+    request: Request,
+    device_id: str,
+    _auth: None = Depends(_require_token),
+):
+    """Xem trạng thái calibration của 1 device."""
+    device_id = _validate_device_id(device_id)
+    rec = _get_calib_db().get_offset(device_id)
+    if rec is None:
+        raise HTTPException(404, f"Device '{device_id}' chưa calibrate")
+    return rec
+
+
+@app.get("/api/ml/calibrate")
+@limiter.limit("60/minute")
+def list_calibrations(
+    request: Request,
+    _auth: None = Depends(_require_token),
+):
+    """Liệt kê tất cả device đã calibrate."""
+    db = _get_calib_db()
+    return {
+        "count": len(db.list_calibrated()),
+        "calibrations": db.list_calibrated(),
+    }
+
+
+@app.delete("/api/ml/calibrate/{device_id}")
+@limiter.limit("10/minute")
+def delete_calibration(
+    request: Request,
+    device_id: str,
+    _auth: None = Depends(_require_token),
+):
+    """Xóa calibration của 1 device (vd subject thay đổi medication, recalibrate)."""
+    device_id = _validate_device_id(device_id)
+    removed = _get_calib_db().remove(device_id)
+    if not removed:
+        raise HTTPException(404, f"Device '{device_id}' chưa có calibration để xóa")
+    return {"status": "removed", "device_id": device_id}
+
+
 @app.get("/api/ppg/history/{device_id}")
 @limiter.limit("60/minute")
 def get_history(
@@ -1161,15 +1391,17 @@ def clear_history(
 ):
     """Xóa lịch sử, SpO2 buffer, overlap buffer và RR accumulator của device."""
     device_id = _validate_device_id(device_id)
-    with _state_lock:
-        keys = list(device_index.get(device_id, []))
-        for k in keys:
-            readings_db.pop(k, None)
-        device_index.pop(device_id, None)
-        spo2_history.pop(device_id, None)
-        overlap_buffer.pop(device_id, None)
-        rr_accumulator.pop(device_id, None)
-        _device_locks.pop(device_id, None)
+    device_lock = _get_device_lock(device_id)
+    with device_lock:
+        with _state_lock:
+            keys = list(device_index.get(device_id, []))
+            for k in keys:
+                readings_db.pop(k, None)
+            device_index.pop(device_id, None)
+            spo2_history.pop(device_id, None)
+            overlap_buffer.pop(device_id, None)
+            rr_accumulator.pop(device_id, None)
+            _device_locks.pop(device_id, None)
     return {"device_id": device_id, "deleted": len(keys)}
 
 

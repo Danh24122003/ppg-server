@@ -68,13 +68,16 @@ logger = logging.getLogger("train_ppg_bp")
 # ============================================================
 # Cau hinh
 # ============================================================
-PROJECT_ROOT = HERE.parent
+PROJECT_ROOT = HERE.parent.parent  # HERE = ML code/ml/, root project = HERE.parent.parent
 DATA_ROOT = PROJECT_ROOT / "DATA" / "PPG_BP database"
 SIGNAL_DIR = DATA_ROOT / "Data File" / "0_subject"
 LABEL_XLSX_CANDIDATES = [
     DATA_ROOT / "Data File" / "PPG-BP dataset.xlsx",
     DATA_ROOT / "Table 1.xlsx",
 ]
+
+# Self-collected reflectance data (MAX30102) - sinh ra tu Backend code/self_collect/log_ppg_local.py
+SELF_COLLECTED_DIR_DEFAULT = PROJECT_ROOT / "collected_data"
 
 FS_RAW = 1000      # Hz — sample rate goc PPG-BP
 FS_TARGET = 100    # Hz — khop ESP32 + MAX30102
@@ -307,6 +310,210 @@ def load_features_and_labels(
 
 
 # ============================================================
+# Self-collected reflectance data (MAX30102 paired voi BP cuff Omron)
+# ============================================================
+def _parse_self_collected_metadata(csv_path: Path) -> Dict[str, str]:
+    """
+    Doc cac dong header bat dau bang '#' cua CSV self-collected,
+    parse thanh dict metadata.
+
+    Format mong doi (sinh ra tu log_ppg_local.py):
+      # subject_id=S001,age=25,sex=M,height_cm=175,weight_kg=70,bmi=22.9
+      # sbp_baseline=118,dbp_baseline=76,sbp_post=120,dbp_post=78
+      # hypertension=n,medication=n,smoking=n,finger=middle,cuff_arm=left
+      # session_date=2026-04-28T17:30:00,fs=100,duration_s=300
+      # notes=...
+    """
+    meta: Dict[str, str] = {}
+    with open(csv_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("#"):
+                break  # ket thuc header khi gap dong khong-comment
+            payload = line[1:].strip()
+            for kv in payload.split(","):
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    meta[k.strip()] = v.strip()
+    return meta
+
+
+def load_self_collected_features(
+    folder: Path,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], List[str]]:
+    """
+    Doc tat ca CSV trong folder, extract 38 features tu IR signal,
+    tra ve (X, y, subject_ids).
+
+    Mot subject co the co nhieu CSV (multiple sessions) — group by subject_id,
+    aggregate mean.
+    """
+    if not folder.exists():
+        logger.warning("Self-collected dir khong ton tai: %s", folder)
+        return np.zeros((0, NUM_TOTAL_FEATURES)), {"sbp": np.array([]), "dbp": np.array([])}, []
+
+    # Prefer cleaned/ subfolder over raw files. Cleaned files (output of
+    # clean_gap_csv.py P3) have disconnects stripped + uniform 100Hz timestamps.
+    # Falls back to raw .csv if no cleaned version exists.
+    cleaned_dir = folder / "cleaned"
+    cleaned_map: Dict[str, Path] = {}
+    if cleaned_dir.exists():
+        for cf in cleaned_dir.glob("*_cleaned.csv"):
+            stem_orig = cf.stem[:-len("_cleaned")]  # strip "_cleaned" suffix
+            cleaned_map[stem_orig] = cf
+        if cleaned_map:
+            logger.info(
+                "Tim thay %d file cleaned trong %s — uu tien dung",
+                len(cleaned_map), cleaned_dir,
+            )
+
+    raw_files = sorted(folder.glob("*.csv"))
+    csv_files: List[Path] = []
+    n_replaced = 0
+    for raw in raw_files:
+        if raw.parent == cleaned_dir:
+            continue  # skip cleaned/ dir if globbed at top level
+        replacement = cleaned_map.get(raw.stem)
+        if replacement is not None:
+            csv_files.append(replacement)
+            n_replaced += 1
+        else:
+            csv_files.append(raw)
+
+    if not csv_files:
+        logger.info("Self-collected dir rong: %s", folder)
+        return np.zeros((0, NUM_TOTAL_FEATURES)), {"sbp": np.array([]), "dbp": np.array([])}, []
+
+    logger.info(
+        "Scan %d file CSV self-collected trong %s (cleaned=%d, raw=%d)",
+        len(csv_files), folder, n_replaced, len(csv_files) - n_replaced,
+    )
+
+    # Group by subject_id de aggregate mean (giong logic PPG-BP)
+    per_subject_feats: Dict[str, List[np.ndarray]] = {}
+    per_subject_bp: Dict[str, Tuple[float, float]] = {}
+    kept = 0
+    skipped = 0
+
+    for csv_path in csv_files:
+        try:
+            meta = _parse_self_collected_metadata(csv_path)
+        except Exception as exc:
+            logger.warning("Khong parse duoc metadata %s: %s", csv_path.name, exc)
+            skipped += 1
+            continue
+
+        sid = meta.get("subject_id")
+        if not sid:
+            logger.warning("File %s thieu subject_id, skip", csv_path.name)
+            skipped += 1
+            continue
+
+        try:
+            sbp = float(meta["sbp_baseline"])
+            dbp = float(meta["dbp_baseline"])
+        except (KeyError, ValueError):
+            logger.warning("File %s thieu sbp_baseline/dbp_baseline, skip", csv_path.name)
+            skipped += 1
+            continue
+
+        try:
+            df = pd.read_csv(csv_path, comment="#")
+        except Exception as exc:
+            logger.warning("Khong doc duoc CSV %s: %s", csv_path.name, exc)
+            skipped += 1
+            continue
+
+        if "ir" not in df.columns or "red" not in df.columns:
+            logger.warning("File %s thieu cot ir/red, skip", csv_path.name)
+            skipped += 1
+            continue
+
+        ir = df["ir"].to_numpy(dtype=np.float64)
+        red = df["red"].to_numpy(dtype=np.float64)
+        if len(ir) < 100:
+            logger.warning("File %s qua ngan (%d samples), skip", csv_path.name, len(ir))
+            skipped += 1
+            continue
+
+        # fs tu timestamps THUC (uu tien) -> fallback metadata -> fallback FS_TARGET.
+        # Reason: firmware co the drift sample rate (vd Sub_3: claimed 104 nhung thuc te 80.7)
+        # Dung fs claimed se resample sai => timing features lech.
+        fs = FS_TARGET
+        if "timestamp_ms" in df.columns and len(df) >= 2:
+            ts = df["timestamp_ms"].to_numpy(dtype=np.float64)
+            dur_s = (ts[-1] - ts[0]) / 1000.0
+            if dur_s > 0:
+                fs_actual = (len(ts) - 1) / dur_s
+                # Sanity: chi accept neu trong range hop ly [25, 400]
+                if 25 <= fs_actual <= 400:
+                    fs = int(round(fs_actual))
+                    fs_meta_claim = meta.get("fs", "?")
+                    if abs(fs - int(fs_meta_claim)) >= 5 if str(fs_meta_claim).isdigit() else False:
+                        logger.warning(
+                            "File %s: fs metadata claim=%s nhung thuc te=%d (drift %.1f%%) — dung fs thuc",
+                            csv_path.name, fs_meta_claim, fs,
+                            abs(fs - int(fs_meta_claim)) / int(fs_meta_claim) * 100,
+                        )
+                else:
+                    try:
+                        fs = int(meta.get("fs", FS_TARGET))
+                    except ValueError:
+                        fs = FS_TARGET
+        else:
+            try:
+                fs = int(meta.get("fs", FS_TARGET))
+            except ValueError:
+                fs = FS_TARGET
+
+        # Resample ve FS_TARGET neu khac
+        if fs != FS_TARGET and fs > 0:
+            ir = resample_to_target(ir, fs, FS_TARGET)
+            red = resample_to_target(red, fs, FS_TARGET)
+
+        try:
+            feats: PPGFeatures = extract_features(ir, red, FS_TARGET)
+        except Exception as exc:
+            logger.warning("Loi extract %s: %s", csv_path.name, exc)
+            skipped += 1
+            continue
+
+        flat = feats.to_flat_array()
+        if flat.shape[0] != NUM_TOTAL_FEATURES or not np.all(np.isfinite(flat)):
+            logger.warning("Feature invalid cho %s, skip", csv_path.name)
+            skipped += 1
+            continue
+
+        per_subject_feats.setdefault(sid, []).append(flat)
+        # Neu cung subject co nhieu session, lay BP cua session DAU TIEN
+        # (cac session sau co the co BP_post/baseline khac do bien dong sinh ly)
+        if sid not in per_subject_bp:
+            per_subject_bp[sid] = (sbp, dbp)
+        kept += 1
+
+    logger.info("Self-collected: %d ok, %d skipped, %d unique subjects",
+                kept, skipped, len(per_subject_feats))
+
+    X_rows: List[np.ndarray] = []
+    y_sbp: List[float] = []
+    y_dbp: List[float] = []
+    sids_out: List[str] = []
+
+    for sid, feat_list in per_subject_feats.items():
+        vec = np.mean(np.stack(feat_list, axis=0), axis=0)
+        X_rows.append(vec)
+        sbp, dbp = per_subject_bp[sid]
+        y_sbp.append(sbp)
+        y_dbp.append(dbp)
+        sids_out.append(sid)
+
+    X = np.stack(X_rows, axis=0) if X_rows else np.zeros((0, NUM_TOTAL_FEATURES))
+    y = {"sbp": np.asarray(y_sbp, dtype=np.float64),
+         "dbp": np.asarray(y_dbp, dtype=np.float64)}
+    return X, y, sids_out
+
+
+# ============================================================
 # Training
 # ============================================================
 def build_model(name: str):
@@ -405,16 +612,70 @@ def save_bundle(model_type: str,
 # ============================================================
 # Main
 # ============================================================
+def _parse_cli_args():
+    """Parse CLI args. Khi chay khong args -> behaviour cu."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Train BP model tu PPG-BP + (optional) self-collected reflectance data",
+    )
+    parser.add_argument(
+        "--self-collected-dir",
+        type=str,
+        default=None,
+        help=(
+            "Folder chua CSV self-collected (sinh tu log_ppg_local.py). "
+            f"Default: {SELF_COLLECTED_DIR_DEFAULT} (auto-detect, skip neu rong)"
+        ),
+    )
+    parser.add_argument(
+        "--no-ppgbp",
+        action="store_true",
+        help="Bo qua PPG-BP transmission dataset, chi train tren self-collected (debug only)",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
-    if not SIGNAL_DIR.exists():
+    args = _parse_cli_args()
+
+    if not args.no_ppgbp and not SIGNAL_DIR.exists():
         logger.error("Khong tim thay thu muc tin hieu: %s", SIGNAL_DIR)
         return 1
 
-    logger.info("Step 1 — Load labels Excel")
-    labels_df = load_labels()
+    # ----- Step 1+2: Load PPG-BP transmission (219 subjects, neu khong --no-ppgbp) -----
+    if args.no_ppgbp:
+        logger.warning("--no-ppgbp set, skip PPG-BP dataset")
+        X = np.zeros((0, NUM_TOTAL_FEATURES))
+        y = {"sbp": np.array([]), "dbp": np.array([])}
+        subject_ids: List = []
+    else:
+        logger.info("Step 1 — Load labels Excel")
+        labels_df = load_labels()
 
-    logger.info("Step 2 — Load signals + extract 38 features (1000 Hz -> 100 Hz)")
-    X, y, subject_ids = load_features_and_labels(labels_df, aggregate="mean")
+        logger.info("Step 2 — Load signals + extract 38 features (1000 Hz -> 100 Hz)")
+        X, y, subject_ids = load_features_and_labels(labels_df, aggregate="mean")
+
+    # ----- Step 2b: Load self-collected reflectance neu co -----
+    self_dir = Path(args.self_collected_dir) if args.self_collected_dir else SELF_COLLECTED_DIR_DEFAULT
+    X_self, y_self, sids_self = load_self_collected_features(self_dir)
+
+    if X_self.shape[0] > 0:
+        logger.info(
+            "Step 2b — Combine PPG-BP (%d) + self-collected (%d) = %d total subjects",
+            X.shape[0], X_self.shape[0], X.shape[0] + X_self.shape[0],
+        )
+        # subject_ids cua PPG-BP la int, self-collected la string -> ep ve string
+        subject_ids = [str(s) for s in subject_ids] + [str(s) for s in sids_self]
+        X = np.vstack([X, X_self]) if X.shape[0] > 0 else X_self
+        y = {
+            "sbp": np.concatenate([y["sbp"], y_self["sbp"]]),
+            "dbp": np.concatenate([y["dbp"], y_self["dbp"]]),
+        }
+    else:
+        logger.info("Step 2b — Khong co self-collected data, train tren PPG-BP only")
+        subject_ids = [str(s) for s in subject_ids]
+
     if X.shape[0] < 20:
         logger.error("Qua it sample sau khi loc (%d). Dung.", X.shape[0])
         return 1
@@ -456,13 +717,21 @@ def main() -> int:
         fitted_models[target] = model
         fitted_scalers[target] = scaler
 
+    n_self = X_self.shape[0]
+    n_ppgbp = X.shape[0] - n_self
+    dataset_label = "PPG-BP (Liang et al. 2018)"
+    if n_self > 0:
+        dataset_label += f" + self-collected reflectance ({n_self} subjects)"
+
     base_metadata = {
-        "dataset": "PPG-BP (Liang et al. 2018)",
+        "dataset": dataset_label,
         "num_subjects": int(X.shape[0]),
+        "num_ppgbp": int(n_ppgbp),
+        "num_self_collected": int(n_self),
         "feature_count": int(X.shape[1]),
         "fs_target_hz": FS_TARGET,
         "fs_raw_hz": FS_RAW,
-        "aggregation": "mean_of_3_recordings_per_subject",
+        "aggregation": "mean_of_recordings_per_subject",
         "targets": list(BP_TARGETS),
         "best_per_target": best_per_target,
         "cv_results": {
@@ -474,32 +743,44 @@ def main() -> int:
     }
 
     saved_paths: List[Path] = []
-    # Neu SBP va DBP chung 1 algorithm -> luu 1 bundle voi tag algorithm do,
-    # chua ca hai target. Neu khac -> luu 2 bundle rieng, moi bundle chi chua
-    # 1 target de ClassicalMLModel load dung model theo MODEL_TYPE env.
-    if best_per_target["sbp"] == best_per_target["dbp"]:
-        chosen = best_per_target["sbp"]
-        metadata = {**base_metadata, "bundle_targets": list(BP_TARGETS)}
-        saved_paths.append(
-            save_bundle(chosen, fitted_models, fitted_scalers, metadata)
-        )
-        logger.info("SBP va DBP cung chon '%s' -> luu 1 bundle.", chosen)
-    else:
-        logger.warning(
-            "SBP chon '%s' nhung DBP chon '%s' -> luu 2 bundle rieng.",
-            best_per_target["sbp"], best_per_target["dbp"],
-        )
-        for target in BP_TARGETS:
-            name = best_per_target[target]
-            metadata = {**base_metadata, "bundle_targets": [target]}
-            saved_paths.append(
-                save_bundle(
-                    name,
-                    {target: fitted_models[target]},
-                    {target: fitted_scalers[target]},
-                    metadata,
-                )
-            )
+    # Luon bundle CA SBP va DBP vao 1 file (random_forest_models.pkl) de
+    # ClassicalMLModel._try_load_models() load tron ven ca 2 target.
+    # Layout 2-bundle cu (SBP rieng / DBP rieng) gay ra bug BP=0/0:
+    # server chi load random_forest_models.pkl -> chi co DBP -> SBP=0 ->
+    # ensemble clamp ve TARGET_RANGES['sbp'].lo = 70 -> firmware hien BP=0/0.
+    # Bundle hop nhat khac phuc triet de. Bundle co the chua mix algo
+    # (vi du SBP=SVR, DBP=RF) — sklearn predict() interface dong nhat,
+    # ClassicalMLModel khong can biet algo cu the.
+    bundle_name = "random_forest"  # ten file co dinh, khop default ClassicalMLModel
+    metadata = {
+        **base_metadata,
+        "bundle_targets": list(BP_TARGETS),
+        "algorithms": dict(best_per_target),  # track algo per-target trong metadata
+    }
+    saved_paths.append(
+        save_bundle(bundle_name, fitted_models, fitted_scalers, metadata)
+    )
+    logger.info(
+        "Bundle hop nhat (SBP=%s, DBP=%s) -> %s_models.pkl",
+        best_per_target["sbp"], best_per_target["dbp"], bundle_name,
+    )
+
+    # Don legacy file tu layout 2-bundle cu de tranh confusion
+    out_dir = Path(MODEL_DIR)
+    if not out_dir.is_absolute():
+        out_dir = HERE / out_dir
+    legacy_files = (
+        "svr_models.pkl", "svr_models.pkl.sha256",
+        "gradient_boosting_models.pkl", "gradient_boosting_models.pkl.sha256",
+    )
+    for fname in legacy_files:
+        p = out_dir / fname
+        if p.exists():
+            try:
+                p.unlink()
+                logger.info("Xoa legacy file: %s", p)
+            except OSError as exc:
+                logger.warning("Khong xoa duoc %s: %s", p, exc)
 
     print("\nTOM TAT")
     print(f"  - N subjects: {X.shape[0]}")

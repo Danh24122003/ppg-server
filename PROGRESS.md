@@ -1,7 +1,7 @@
 # PPG Monitor — Báo Cáo Tiến Trình Tổng Thể
 
-> Cập nhật lần cuối: **2026-04-26 (evening)**  
-> Trạng thái: **ACTIVE** — Backend v4.3 LIVE, ML server v4.3 vừa merge HRV logic, firmware v4.0.9 thesis-ready
+> Cập nhật lần cuối: **2026-05-01 (sáng)**  
+> Trạng thái: **ACTIVE** — Backend + ML LIVE v4.3, firmware v4.1.0 fs=100Hz, BP bundle Cách 3 fixed, **6/30 paired recordings thu được, BP eval thực tế xác nhận model degenerate** (SBP_pred const 118.3 cho mọi subject — domain gap reflectance vs PPG-BP transmission).
 
 ---
 
@@ -62,6 +62,8 @@
 | Task | Trạng thái | Ghi chú |
 |------|-----------|---------|
 | BP model training + deploy ML server | ✅ DONE | RF + SVR train PPG-BP dataset, LIVE tại `ppg-ml.onrender.com` |
+| **BP bundle fix Cách 3** | ✅ **DONE 27/4** | `train_ppg_bp.py:629-666` luôn bundle SBP+DBP vào 1 file `random_forest_models.pkl`, auto-cleanup legacy `svr_models.pkl`. Synthetic SBP=118.2, DBP=69.7. |
+| **BP eval trên 6 self-collected** | ⚠️ **DEGENERATE 1/5** | SBP_pred = 118.3 const cho cả 6 subject (= training mean). MAE SBP 14.60, ME +10.80; MAE DBP 5.03 (sát AAMI nhờ phân phối hẹp). Confirm cross-domain gap không bridge được nếu không có self-collected reflectance training data. |
 | Firebase Firestore thay in-memory | ⏳ CHƯA | Vẫn dùng Python dict (production cần migrate) |
 | WebSocket streaming | ⏳ CHƯA | Batch POST 5s vẫn OK cho MVP |
 | Dashboard web | ⏳ CHƯA | Android app làm UI chính |
@@ -93,7 +95,7 @@
 | Mid-day | **Backend v4.3** — Apply Task Force 1996 formula + pNN20 + reliability indicator. 182 tests |
 | Afternoon | **Firebase Replay Validation** — Script `replay_firebase_data.py` chạy real data → 16/16 chunks OK, HR error 0.3 BPM vs FFT |
 
-### 2026-04-26 (thứ 6 — hôm nay)
+### 2026-04-26 (thứ 6)
 | Thời gian | Sự kiện |
 |-----------|---------|
 | Morning (~7am) | **Test 1:** Switch firmware URL → backend v4.3, threshold loosen v1 (R 0.3-2.0, PI 0.003). NodeMCU-32S v4.0.9 + Backend v4.3 → fs=50Hz, AC% 0.06-18.94% varied, HR conf 0.55-1.0, HRV rr_count 194-210 reliability=high, SpO2 đôi lúc valid (R 0.4-1.5) |
@@ -101,9 +103,55 @@
 | Evening | **Threshold tighten evidence-backed:** SPO2_RATIO_MAX 2.0→1.4 (Blaney 2024), SPO2_PI_MIN 0.003→0.002 (Schneider 2024 / JAMA 2024). 181/181 tests pass |
 | Evening | **ML server v4.3 merge:** Vừa merge backend v4.3 logic vào `ML code/ml/main.py` (1190 dòng) — đầy đủ HRV (HeartPy, RR accumulator, pNN20, reliability, LF/HF, Blaney thresholds) + ML BP. 10 endpoints, auth + rate-limit applied |
 
+### 2026-04-27 (thứ 7)
+- **BP bundle fix Cách 3** — `train_ppg_bp.py` retrain bundle SBP (SVR) + DBP (RF) vào 1 file `random_forest_models.pkl`. Synthetic SBP=118.2, DBP=69.7. CV metrics: MAE SBP 15.41, DBP 9.15.
+- **Firmware v4.1.0** — fs=50→100Hz, validated 9 phút streaming, drops=0.
+
+### 2026-04-28 (chủ nhật)
+- **Self-collect pipeline READY** — log_ppg_local.py + eval_bp_metrics.py + protocol docs. QA 44/44 pass + 4 P0 bugs fixed. First success Self_test 01 (5min FULL, 30,839 samples).
+
+### 2026-04-29 (thứ 4) — Recruit batch 1
+- 5 subject thực thu trong ngày: S001 Danh01 (5:13am), S002 Quoc_01 (10:42am), S005 Minh_01 (14:51pm), S006 Sub_3 (15:08pm), S007 CH_1 (16:26pm). Tổng cộng `collected_data/` có 6 CSV / 6 subject (incl. Self_test 01).
+
+### 2026-05-01 (hôm nay) — Sanity-check ML pipeline
+| Thời gian | Sự kiện |
+|---|---|
+| Sáng | **Tạo `Backend code/self_collect/eval_collected_data.py`** — load EnsemblePredictor (bundle SBP+DBP OK), extract 38 features từ 6 CSV, predict, so cuff baseline. |
+| Sáng | **Phát hiện 3 data-quality issues** (xem section "Self-collect data quality" dưới): fs khai vs thực drift (Sub_3 lệch 22%); duration_s metadata vs (ts_last-ts_first)/1000 lệch 19-54%; CSV header `sbp_baseline` chỉ là lần 1 thay vì mean(2,3) theo AHA. |
+| Sáng | **BP eval result:** SBP_pred = **118.3 const cho cả 6 subject** (= mean PPG-BP training set) ⇒ degenerate. SBP MAE 14.60, ME +10.80; DBP MAE 5.03 (sát AAMI nhờ phân phối hẹp). Đúng signature regression-to-mean cross-domain transmission→reflectance theo Moulaeifard 2025. |
+
 ---
 
-## Real-World Validation (mới!)
+## Self-collect data quality (2026-05-01)
+
+**Inventory `collected_data/` — 6 paired recording (28-29/4):**
+
+| # | Subject | fs khai/thực | Dur meta/thực (s) | n samples | SBP cuff | SBP_pred | DBP cuff | DBP_pred |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Self_test 01 | 104 / 104.5 ✓ | 362 / 295 (−19%) | 30,839 | 97 | 118.3 | 64 | 70.0 |
+| 2 | S001 Danh01 | 104 / 104.2 ✓ | 374 / 302 (−19%) | 31,425 | 106 | 118.3 | 70 | 70.6 |
+| 3 | S002 Quoc_01 | 104 / 99.6 | 579 / 321 (−45%) ⚠ | 31,952 | 98 | 118.3 | 68 | 70.9 |
+| 4 | S005 Minh_01 | **91** / 88.0 | 462 / 352 (−24%) | 31,000 | 96 | 118.3 | 71 | 73.0 |
+| 5 | S006 Sub_3 | 104 / **80.7** ⚠ | 705 / 403 (−43%) ⚠ | 32,500 | 121 | 118.3 | 79 | 72.6 |
+| 6 | S007 CH_1 | 104 / 100.3 ✓ | 692 / 318 (−54%) ⚠ | 31,873 | 127 | 118.3 | 83 | 70.7 |
+
+**Aggregate metrics (N=6, vs cuff baseline lần 1):**
+- SBP: ME +10.80 mmHg, MAE **14.60**, SD 13.40, range −8.7…+22.3
+- DBP: ME −1.20, MAE **5.03**, SD 6.82, range −12.3…+6.0
+- HR_pred = 30 cho mọi subject (bundle không train HR → ensemble lower-bound clamp)
+
+**Diagnosis: model degenerate (regression-to-mean)** — SBP_pred const 118.3 = chính giá trị mean của PPG-BP training set. Variance feature từ MAX30102 reflectance gần như **không di chuyển dự đoán** → khớp benchmark cross-dataset calibration-free Moulaeifard et al. 2025 (PPGBP SBP MAE 18.7-25.0). N=6 ≪ N≥85 yêu cầu AAMI ⇒ chỉ là sanity-check.
+
+**3 data-quality issues phải fix trước khi train với self-collected data:**
+1. **fs khai báo (104) vs fs thực từ timestamp** — Sub_3 lệch 22%, Quoc_01 lệch 4%. `train_ppg_bp.load_self_collected_features()` resample theo `fs_meta` ⇒ nếu sai sẽ warp tần số. Fix: dùng `fs = (n-1) / ((ts_last-ts_first)/1000)`.
+2. **`duration_s` metadata vs `(ts_last-ts_first)/1000`** lệch 19-54% trên 5/6 file — nghi `log_ppg_local.py` ghi wall-clock thay vì stream-active time. Cần audit trước khi train.
+3. **CSV header `sbp_baseline` chỉ là lần 1** thay vì `mean(lần 2,3)` theo AHA. Excel mới có 2/3 lần đo. Ground truth đã sai lệch ~3-5 mmHg.
+
+**Coverage gap:** 6 N + 0 E + 0 Stage 1 + 0 Stage 2 (plan: 5+5+5). Cần 9 subject HTN.
+
+---
+
+## Real-World Validation (Firebase replay 2026-04-25)
 
 **Đã validate backend v4.3 với 86 giây PPG data thật từ Firebase Realtime DB.**
 
