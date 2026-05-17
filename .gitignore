@@ -1,0 +1,115 @@
+# ============================================================
+# PPG Monitor — .gitignore for thesis backup (private repo)
+# Strategy: exclude PII / copyrighted data / large binaries /
+# regeneratable artifacts. Keep source + thesis + production
+# model bundle only.
+# ============================================================
+
+# --- Python virtualenvs / caches ---
+.venv-track-a/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+~$*
+*.tmp
+*.bak
+*.bak_*
+
+# --- Privacy: patient PPG data (PII, contains real names) ---
+collected_data/
+**/collected_data/
+
+# --- Copyright: external datasets (Liang 2018, BIDMC, PPG-DaLiA) ---
+DATA/
+external_data/
+
+# --- Copyright: research paper PDFs (publisher licenses) ---
+Paper/
+
+# --- Large pretrained ML weights (re-downloadable from MIT) ---
+ML code/ml/transfer/
+**/transfer/models/*.pkl
+**/transfer/data/
+
+# --- SQA feature caches (regeneratable from external_data) ---
+**/sqa_features_cache.pkl
+**/sqa_features_cache_*.pkl
+
+# --- Model backups (keep only current production) ---
+**/random_forest_models_*_BACKUP.pkl
+**/random_forest_models_AFTER_RETRAIN_*.pkl
+**/random_forest_models_REDUCED_*.pkl
+**/random_forest_models_PRE_*.pkl
+**/_backups_pre_experiments/
+**/sqa_lr_model_day5_historical.pkl
+
+# --- Android build artifacts ---
+Android code/build/
+Android code/app/build/
+Android code/.gradle/
+Android code/gradle/wrapper/gradle-wrapper.jar
+Android code/local.properties
+**/.gradle/
+**/build/
+*.apk
+*.aab
+*.dex
+
+# --- Arduino build artifacts ---
+**/build/
+*.elf
+*.hex
+
+# --- Thesis: keep only latest v21 (drop older versions) ---
+Thesis/Bao_cao_v17_FINAL_FromCapstone.docx
+Thesis/Bao_cao_v18_FINAL_FromCapstone.docx
+Thesis/Bao_cao_v19_FINAL_FromCapstone.docx
+Thesis/Bao_cao_v20_FINAL_FromCapstone.docx
+
+# --- Thesis: drop Word lock files / Word temp ---
+Thesis/~$*
+**/~$*.docx
+
+# --- Logs & large CSV result dumps (keep summary CSVs) ---
+*.log
+*.log.*
+
+# --- Render / deployment secrets (no-op safety net) ---
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+
+# --- Generated demo binaries ---
+demo_slides.pptx
+
+# --- Temporary inner .git rename (for one-shot backup) ---
+**/.git_disabled_for_backup/
+
+# --- Encrypted backups output (collected_data PII archives) ---
+backups/
+*.7z
+*.7z.sha256
+
+# --- Allow specific exceptions (whitelist) ---
+!.gitignore
+!.gitattributes

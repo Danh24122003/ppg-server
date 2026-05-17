@@ -1,0 +1,93 @@
+{
+  "task": "Path B 1-anchor calibration direct measurement on current cohort",
+  "run_date": "2026-05-14",
+  "phase": "late evening Wave 2",
+  "eval_script": "Backend code/self_collect/eval_path_b_1anchor.py",
+  "inputs": {
+    "drift_sbp_csv": "_drift_results_sbp.csv",
+    "drift_dbp_csv": "_drift_results_dbp.csv",
+    "input_mtime": "2026-05-11 21:57",
+    "cohort_state": "post Tier 1 merge (S12 S2 + S11 S2 + S13 S2 included)"
+  },
+  "cohort": {
+    "total_rows": 29,
+    "unique_subjects": 15,
+    "anchors": 15,
+    "drift_datapoints_sbp": 14,
+    "drift_datapoints_dbp": 14,
+    "multi_session_subjects": ["S01", "S02", "S03", "S05", "S07", "S08", "S09", "S10", "S11", "S12", "S13"]
+  },
+  "results_path_b_1anchor": {
+    "sbp": {
+      "n_drift": 14,
+      "mae_direct_mmHg": 6.50,
+      "ci_95_lo": 4.14,
+      "ci_95_hi": 9.21,
+      "bootstrap_resamples": 10000,
+      "bootstrap_seed": 42
+    },
+    "dbp": {
+      "n_drift": 14,
+      "mae_direct_mmHg": 5.93,
+      "ci_95_lo": 4.57,
+      "ci_95_hi": 7.43,
+      "bootstrap_resamples": 10000,
+      "bootstrap_seed": 42
+    }
+  },
+  "hybrid_1anchor_reference": {
+    "sbp_mae_direct_mmHg": 7.43,
+    "dbp_mae_direct_mmHg": 6.90,
+    "source": "abs_err_calibrated column in drift CSVs"
+  },
+  "delta_path_b_minus_hybrid": {
+    "sbp": -0.93,
+    "dbp": -0.97,
+    "interpretation": "Path B better than Hybrid by 0.93 (SBP) and 0.97 (DBP) mmHg. CLAUDE.md `+0.93` / `+0.97` are positive in `Hybrid - Path B` convention (Path B BEATS Hybrid)."
+  },
+  "comparison_vs_derived_estimate": {
+    "derived_sbp_in_task_prompt": 8.36,
+    "derived_dbp_in_task_prompt": 7.87,
+    "diff_direct_minus_derived_sbp": -1.86,
+    "diff_direct_minus_derived_dbp": -1.94,
+    "root_cause": "Task prompt added Path B = Hybrid + 0.93 (assuming +0.93 means Path B WORSE). Actual sign convention in CLAUDE.md and PROGRESS.md is `Hybrid - Path B = +0.93` (Path B BETTER). Correct derivation = Hybrid - delta = 7.43 - 0.93 = 6.50 SBP / 6.90 - 0.97 = 5.93 DBP, which matches direct measurement exactly."
+  },
+  "per_subject_breakdown": [
+    {"subject_id": "S01",     "n": 2, "sbp_mae": 9.50,  "dbp_mae": 6.50},
+    {"subject_id": "S02",    "n": 1, "sbp_mae": 0.00,  "dbp_mae": 7.00},
+    {"subject_id": "S03",   "n": 3, "sbp_mae": 7.67,  "dbp_mae": 5.33},
+    {"subject_id": "S05",    "n": 1, "sbp_mae": 18.00, "dbp_mae": 4.00},
+    {"subject_id": "S07",   "n": 1, "sbp_mae": 5.00,  "dbp_mae": 12.00},
+    {"subject_id": "S08", "n": 1, "sbp_mae": 4.00,  "dbp_mae": 4.00},
+    {"subject_id": "S09",   "n": 1, "sbp_mae": 2.00,  "dbp_mae": 5.00},
+    {"subject_id": "S10",  "n": 1, "sbp_mae": 10.00, "dbp_mae": 4.00},
+    {"subject_id": "S11",  "n": 1, "sbp_mae": 3.00,  "dbp_mae": 1.00},
+    {"subject_id": "S12",  "n": 1, "sbp_mae": 4.00,  "dbp_mae": 7.00},
+    {"subject_id": "S13",   "n": 1, "sbp_mae": 3.00,  "dbp_mae": 10.00}
+  ],
+  "aami_comparison": {
+    "aami_threshold_mae_mmHg": 5.0,
+    "sbp_passes_aami_point_estimate": false,
+    "sbp_ci_includes_aami": true,
+    "dbp_passes_aami_point_estimate": false,
+    "dbp_ci_includes_aami": true,
+    "note": "Both point estimates above AAMI ME 5.0 threshold; both 95% CIs straddle the threshold. AAMI requires N=85 paired sessions for compliance claim; n=14 is pilot underpowered."
+  },
+  "files_created": [
+    "Backend code/self_collect/eval_path_b_1anchor_rerun_2026-05-14/report.txt",
+    "Backend code/self_collect/eval_path_b_1anchor_rerun_2026-05-14/per_subject_breakdown.csv",
+    "Backend code/self_collect/eval_path_b_1anchor_rerun_2026-05-14/bootstrap_summary.csv",
+    "Backend code/self_collect/eval_path_b_1anchor_rerun_2026-05-14/per_row_path_b_1anchor.csv",
+    "Backend code/self_collect/path_b_1anchor_eval_2026-05-14_late.json",
+    "Backend code/self_collect/path_b_1anchor_REPORT.md"
+  ],
+  "files_not_touched": [
+    "ML code/ml/train_ppg_bp.py",
+    "ML code/ml/ml_models.py",
+    "ML code/ml/calibration_db.py",
+    "ML code/ml/main.py",
+    "Backend code/main.py",
+    "Backend code/self_collect/eval_path_b_1anchor.py (no modification, only invocation)",
+    "ML code/ml/models/random_forest_models.pkl (SHA256 63d70043771a... unchanged)"
+  ]
+}

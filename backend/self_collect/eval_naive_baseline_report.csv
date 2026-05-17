@@ -1,0 +1,5 @@
+method,description,sbp_mae,sbp_me,dbp_mae,dbp_me
+model_degenerate,Model raw (predict const 118.3),7.1529411764705895,0.3882352941176484,3.376470588235293,-1.6588235294117641
+naive_pop_mean,Naive baseline 1: predict population mean (118.3/75),13.182352941176468,9.123529411764704,6.764705882352941,2.411764705882353
+naive_loo_mean,Naive baseline 2: predict LOO subject mean,11.198529411764707,0.0,6.485294117647059,0.0
+calibrated_loo,Per-subject calibrated (LOO offset average),7.430147058823531,1.6718652606120004e-15,3.845588235294116,1.6718652606120004e-15

@@ -1,0 +1,45 @@
+MIT License
+
+Copyright (c) 2026 PPG Monitor Thesis Project — HCMUT BME Capstone
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-Party Components and Datasets
+
+This software interfaces with, but does not redistribute, the following third-
+party datasets and reference materials:
+
+- **PPG-BP dataset** (Liang et al. 2018) — used for training the BP regression
+  model. Available from the original authors under the data-use terms of
+  Figshare. Not redistributed in this repository.
+- **BIDMC PPG and Respiration Dataset** (Pimentel et al. 2016 / PhysioNet) —
+  used for cross-dataset SQA evaluation. Available from PhysioNet under the
+  ODC Open Database License. Not redistributed in this repository.
+- **PPG-DaLiA dataset** (Reiss et al. 2019 / UCI) — used for cross-dataset SQA
+  evaluation. Available from UCI Machine Learning Repository under CC BY 4.0.
+  Not redistributed in this repository.
+- **MAXREFDES117 reference firmware** (Maxim Integrated 2014, now Analog
+  Devices) — the SpO2 calibration polynomial originates from this manufacturer
+  reference design and is redistributed under the MIT licence in the SparkFun
+  MAX3010x Arduino library.
+
+Self-collected cohort PPG recordings (`collected_data/`) are excluded from
+this repository for participant privacy.

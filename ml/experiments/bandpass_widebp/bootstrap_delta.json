@@ -1,0 +1,21 @@
+{
+  "sbp": {
+    "n": 15,
+    "mean_delta": 0.8425958147228604,
+    "ci95_lo": 0.25035404983239895,
+    "ci95_hi": 1.4759732717032132,
+    "p_two_sided": 0.0042,
+    "n_boot": 10000,
+    "interpretation": "negative delta = variant improves over baseline (lower abs error)"
+  },
+  "dbp": {
+    "n": 15,
+    "mean_delta": 0.3926336156695527,
+    "ci95_lo": 0.12443426930837757,
+    "ci95_hi": 0.6755566941535202,
+    "p_two_sided": 0.0034,
+    "n_boot": 10000,
+    "interpretation": "negative delta = variant improves over baseline (lower abs error)"
+  },
+  "convention": "delta = variant_8hz - baseline_4hz; negative = improvement"
+}

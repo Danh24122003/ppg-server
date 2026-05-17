@@ -1,0 +1,22 @@
+# fly.toml — config cho ppg-server-ezaidq
+# 4 sửa so với version Fly.io auto-generate:
+#   1. internal_port: 8080 → 8000 (match uvicorn default)
+#   2. auto_stop_machines: true → false (always-on, không sleep)
+#   3. min_machines_running: 0 → 1 (luôn có ít nhất 1 instance)
+#   4. Bỏ memory_mb (xung đột với memory = "1gb")
+
+app = "ppg-server-ezaidq"
+primary_region = "sin"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

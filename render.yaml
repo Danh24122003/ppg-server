@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ppg-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    envVars:
+      - key: PORT
+        value: 8000
+
+  - type: web
+    name: ppg-ml
+    runtime: docker
+    plan: free
+    dockerfilePath: ./ml/Dockerfile
+    dockerContext: ./ml
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: PPG_STRICT_PKL_VERIFY
+        value: "1"
