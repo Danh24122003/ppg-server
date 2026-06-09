@@ -27,6 +27,7 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, welch
 from scipy.interpolate import interp1d
+from scipy.stats import skew as _scipy_skew, kurtosis as _scipy_kurtosis, entropy as _scipy_entropy
 import hmac
 import os
 import re
@@ -726,34 +727,91 @@ def calculate_spo2_confidence(ir: np.ndarray, red: np.ndarray,
 # ============================================================
 # Đánh giá chất lượng tín hiệu
 # ============================================================
-def assess_signal_quality(raw_signal: np.ndarray,
-                          filtered_signal: np.ndarray,
-                          peaks: list, fs: int) -> str:
-    score = 0
+def compute_sqi_features(raw_signal: np.ndarray,
+                         filtered_signal: np.ndarray,
+                         peaks: list, fs: int) -> dict:
+    """Multi-criterion SQI features for PPG batch.
 
-    # Spectral purity: tỷ lệ công suất trong band HR [0.5-4.0 Hz] / tổng công suất
+    Returns dict with 6 raw feature values (no thresholding):
+        spectral_purity, hr_bpm, amplitude_ratio, ssqi, ksqi, entropy_amp_dist.
+
+    Citations:
+        - Spectral purity: Clifford et al. 2012 (multi-index SQI framework)
+        - HR plausibility: Orphanidou et al. 2015 IEEE JBHI 19(3):832-838
+        - sSQI / kSQI: Elgendi 2016, Bioengineering 3(4):21,
+          DOI 10.3390/bioengineering3040021. sSQI = third standardized
+          moment (skewness). kSQI = fourth standardized moment (raw
+          Pearson kurtosis, NOT excess) per paper formula
+          `(1/N) Σ [(xᵢ-μ)/σ]^4`.
+        - entropy_amp_dist: Shannon entropy of normalized |signal| amplitude
+          distribution per Cover & Thomas 1991, "Elements of Information
+          Theory" (NOT Sample Entropy of Elgendi 2016 — different metric).
+    """
+    feats: dict = {
+        "spectral_purity": 0.0,
+        "hr_bpm": 0.0,
+        "amplitude_ratio": 0.0,
+        "ssqi": 0.0,
+        "ksqi": 0.0,
+        "entropy_amp_dist": 0.0,
+    }
+
     nperseg = min(256, len(filtered_signal) // 2)
     if nperseg >= 16:
         freqs, psd = welch(filtered_signal, fs=fs, nperseg=nperseg, window="hann")
         hr_band = (freqs >= 0.5) & (freqs <= 4.0)
         total_power = float(np.trapezoid(psd, freqs)) + 1e-12
         hr_power = float(np.trapezoid(psd[hr_band], freqs[hr_band]))
-        purity = hr_power / total_power
-        if purity >= 0.70:
-            score += 2
-        elif purity >= 0.40:
-            score += 1
+        feats["spectral_purity"] = hr_power / total_power
 
-    duration = len(filtered_signal) / fs
+    duration = len(filtered_signal) / fs if fs else 0.0
     if len(peaks) >= 2 and duration > 0:
-        bpm = len(peaks) / duration * 60
-        if 40 <= bpm <= 180:
-            score += 2
-        elif 30 <= bpm <= 200:
-            score += 1
+        feats["hr_bpm"] = len(peaks) / duration * 60.0
 
-    amplitude = np.max(filtered_signal) - np.min(filtered_signal)
-    if amplitude > 0.01 * np.mean(np.abs(raw_signal)):
+    raw_mean_abs = float(np.mean(np.abs(raw_signal))) + 1e-12 if len(raw_signal) else 1e-12
+    if len(filtered_signal) > 0:
+        amplitude = float(np.max(filtered_signal) - np.min(filtered_signal))
+    else:
+        amplitude = 0.0
+    feats["amplitude_ratio"] = amplitude / raw_mean_abs
+
+    if len(filtered_signal) >= 8 and float(np.std(filtered_signal)) > 1e-9:
+        feats["ssqi"] = float(_scipy_skew(filtered_signal))
+        feats["ksqi"] = float(_scipy_kurtosis(filtered_signal, fisher=False))
+        abs_sig = np.abs(filtered_signal)
+        s = float(abs_sig.sum())
+        if s > 0:
+            p = abs_sig / s
+            feats["entropy_amp_dist"] = float(_scipy_entropy(p + 1e-12, base=2))
+
+    return feats
+
+
+def assess_signal_quality(raw_signal: np.ndarray,
+                          filtered_signal: np.ndarray,
+                          peaks: list, fs: int) -> str:
+    """Legacy 3-criterion gate. Returns 'good'/'fair'/'poor'.
+
+    Backward-compat wrapper. New SQI features (sSQI/kSQI/entropy_amp_dist)
+    are computed but do NOT contribute to the score yet — threshold tuning
+    deferred to LR classifier (W2 of Deep SQA plan).
+    """
+    feats = compute_sqi_features(raw_signal, filtered_signal, peaks, fs)
+    score = 0
+
+    purity = feats["spectral_purity"]
+    if purity >= 0.70:
+        score += 2
+    elif purity >= 0.40:
+        score += 1
+
+    bpm = feats["hr_bpm"]
+    if 40 <= bpm <= 180:
+        score += 2
+    elif 30 <= bpm <= 200:
+        score += 1
+
+    if feats["amplitude_ratio"] > 0.01:
         score += 1
 
     if score >= 4:
@@ -1018,9 +1076,9 @@ def upload_ppg_data(
                         logger.info("Evict device | device={}", oldest_device)
 
             # Commit reading + device_index
+            # DEMO: keep filtered_signal + peaks in /api/ppg/latest response
+            # (production stripped these to save memory ~4KB/reading)
             result_stored = result.model_dump()
-            result_stored.pop("filtered_signal", None)
-            result_stored.pop("peaks", None)
             readings_db[reading_id] = result_stored
             device_index.setdefault(reading.device_id, []).append(reading_id)
 
@@ -1401,7 +1459,6 @@ def clear_history(
             spo2_history.pop(device_id, None)
             overlap_buffer.pop(device_id, None)
             rr_accumulator.pop(device_id, None)
-            _device_locks.pop(device_id, None)
     return {"device_id": device_id, "deleted": len(keys)}
 
 

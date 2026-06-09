@@ -466,10 +466,13 @@ def load_self_collected_features(
             except ValueError:
                 fs = FS_TARGET
 
-        # Resample ve FS_TARGET neu khac
-        if fs != FS_TARGET and fs > 0:
-            ir = resample_to_target(ir, fs, FS_TARGET)
-            red = resample_to_target(red, fs, FS_TARGET)
+        # APPROACH B (2026-05-03): SKIP resample for self-collected, treat as fs=100Hz.
+        # Reason: Files có fs_real=111Hz (timing artifact ESP32 millis()) vs 100Hz nominal
+        # tạo feature distribution shift KHÁC NHAU file-by-file qua resample → bias varied
+        # → calibration FAIL. Skip resample chấp nhận bias 11% nhưng CONSTANT cross-files
+        # → calibration absorbs. Verified eval 3/5 đêm: D MAE 6.35 < Naive anchor 7.50.
+        # fs detection ở trên giữ nguyên cho diagnostic logging (warn drift ≥5Hz).
+        # _ = fs  # kept for backward-compat diagnostic; intentionally unused below.
 
         try:
             feats: PPGFeatures = extract_features(ir, red, FS_TARGET)
